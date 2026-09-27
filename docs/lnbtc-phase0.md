@@ -121,3 +121,108 @@ resource server 側に置くなら最初から外部のトランザクショナ�
 
 未実装。invoice の発行と decode、BOLT11 署名検証、リプレイストアの実体、
 `/settle` エンドポイント、402 accepts への lnbtc エントリ追加。
+
+---
+
+# Phase 1 の進捗（2026-09-27、v2 指示書に対応）
+
+## PR #1873 は取得できた
+
+v1 の時点では「未マージのため取得できない」としたが、git プロトコルなら取れる。
+
+```sh
+git fetch --depth 1 https://github.com/x402-foundation/x402 refs/pull/1873/head
+```
+
+`refs/pull/1873/head` = `2d85314c42fab607395c78cb09ecc926110252ff`。これで PR #1873 の
+存在も確認できた（HTTP API と HTML は 403 のままなので、他の PR 番号は未検証）。
+
+## vendoring の方針
+
+`python/x402/mechanisms/lnbtc` を `facilitator/vendor/lnbtc/` に取り込んだ。SDK 本体
+（`x402.schemas` / `x402.interfaces`）は pypi の `x402==2.24.0` を使う。PR の
+`python/x402/pyproject.toml` も version 2.24.0 なので一致する。
+
+vendoring したファイルへの変更は相対 import の絶対化のみ。
+
+```
+from ...schemas   -> from x402.schemas
+from ....schemas  -> from x402.schemas
+from ....interfaces -> from x402.interfaces
+```
+
+上流がマージされたら `facilitator/vendor/` を削除して pypi 版へ切り替える。差分を保つため
+`pyproject.toml` の ruff に `exclude = ["facilitator/vendor"]` を入れ、整形も lint もしない。
+
+追加依存は `[project.optional-dependencies].lnbtc` に分離した。
+`x402==2.24.0` / `bolt11` / `bech32` / `coincurve` / `rfc8785`。
+PR 側は lnbtc 用の optional-dependency group を追加していないので、ここは自前で定義した。
+
+## 実装の正しさを突き合わせた結果
+
+PR の実装は仕様どおりだった。読み違えかけた点を1つ記録しておく。`validation.py` の
+`validate_invoice(check_expiry=True)` は skew を足さずに期限判定するが、`/settle` 経路は
+`check_expiry=False` で呼び、facilitator 側で `invoice.date + invoice.expiry + skew` を
+使っている。仕様の paid-but-expired ポリシーに一致する。`check_expiry=True` は支払う前の
+クライアント検証用で、そこで猶予に頼らないのは妥当。
+
+`retain_until` も `invoice_end + skew + REPLAY_RETENTION_SECONDS(3600)` で仕様の下限どおり。
+
+Python の binding と TypeScript の `src/lib/lnbtc.ts` が、仕様の HTTP / MCP ベクタで
+同一ダイジェストを出すことを確認した。独立に書いた 2 実装が仕様値に一致している。
+
+## PR に無くて足したもの
+
+### 保持期限の掃除（`facilitator/replay.py`）
+
+PR の `SQLiteReplayStore` は `retain_until` を記録するが、行を削除する処理が無い。
+`RetainingSQLiteReplayStore` で以下を足した。
+
+- 保持期限の下限。v2 §2 の固定 24 時間と、仕様が要求する
+  `invoice_end + skew + 1h` の大きいほうを採る。固定 24 時間だけにすると
+  `maxTimeoutSeconds` が長い場合に仕様下限を割る（テストで固定した）。
+- `purge(now)`。`retain_until <= now` の行だけを削除する。invoice がまだ検証を通る間は
+  絶対に消えないことをテストで示した。
+
+### `/settle` の HTTP 境界（`facilitator/settle.py`）
+
+- `POST /settle`。成功は 200、失敗は 402 で `errorReason` のみ返す。
+  `payer` は出さない（仕様上省略必須）。`error_message` は入力依存の詳細を含み得るので
+  ワイヤに出さない。
+- `POST /verify` は実装しない。`upfront` flow の誤用として 400 +
+  `invalid_exact_lnbtc_payment_flow` を返す。
+- arming guard。`allow_mainnet=False`（既定）では mainnet の network 識別子を
+  検証にも消費にも進ませず 400 で拒否する。
+- `GET /healthz` で許可ネットワーク・skew・保持期限を確認できる。
+
+### TypeScript 側の公開オリジン固定
+
+v2 §6 の要求。Python の `http_request_binding` は `public_origin` を必須にして
+URL のオリジン一致を検査していたが、こちらの TS 実装には無かった。`httpBinding` に
+`publicOrigin` を必須引数として足し、不一致と path/query 付きオリジンを拒否する。
+リクエストハッシュを再計算するのは resource server（TS 側）なので、ここが効く。
+
+## 検証
+
+- Python 183 件（新規 26 件）。仕様ベクタ一致、否定系（preimage 不一致・別リクエストへの
+  付け替え・inline description・通貨不一致）、境界時刻（`invoice_end + skew` ちょうど通す /
+  +1 秒で拒否、作成時刻 `settlement + skew` ちょうど通す / +1 秒で拒否）、
+  消費キーのネットワーク分離、同時実行（16 スレッド × 64 回で成功 1 件のみ、
+  `/settle` 同時 16 回で成功 1 件のみ）、再起動耐性、保持期限と掃除、`/settle` の HTTP 境界。
+- TypeScript 48 件。`npm run typecheck` 成功。
+- `npm run build` は exit 0。ただしこのセッションで 1 回だけ exit 1 になった。ログは
+  `facilitator.payai.network` へのサンドボックス遮断（403）で、既存の Solana 経路が
+  ビルド時に facilitator 初期化を試みて失敗するもの。再実行 2 回はいずれも exit 0。
+  コード側の失敗ではない。
+- ノード・実支払い・Lightning ネットワークへの通信は一切していない。invoice は
+  仕様が公開しているテスト鍵でローカル署名して作っている。
+
+## 残っている判断
+
+- Lightning ノードの選定（v2 §2 は LND 自前 VPS が第一候補、既存 VPS の有無で最終決定）。
+- msat 建て価格。`msat = ceil(USD ÷ BTCUSD × 10^11)` の入力となる BTC/USD スポットを
+  この実行環境から取得できない（外向き通信はパッケージレジストリと
+  `raw.githubusercontent.com` 系のみ）。運用者がスポット値・取得時刻・出典を決めて
+  `docs/lnbtc-pricing.md` に記録する必要がある。
+- ファシリテータのデプロイ先と、resource server からの認証方法（Vercel から
+  単一ホストの `/settle` を叩く経路の保護）。v2 には項目が無い。
