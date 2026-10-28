@@ -93,7 +93,7 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 - `facilitator/purge.py`：掃除を 1 回だけ行うコマンド（`python -m facilitator.purge`）。ストアのファイルが無ければ作らずに止める
 - `facilitator/auth.py`・`facilitator/credit.py`・`facilitator/pricing.py`
 - `tests/fakes.py`：偽の受信側アダプタ（仕様のテスト専用鍵でローカル署名、LND と同じ feature を立てる）。本番の入口からは使わない
-- `docs/deploy.md`：VPS（systemd、掃除の timer）、Voltage、Cloudflare Tunnel と Access、mainnet の少額往復の手順の下書き。TODO が残っている
+- `docs/deploy.md`：VPS（systemd、掃除の timer）、Voltage（macaroon、接続元 IP の制限、インバウンド流動性）、Cloudflare Tunnel と Access、mainnet の少額往復の手順の下書き。Voltage の項目は公開情報で埋めたもので、実ノードでは未確認
 - `.github/workflows/ci.yml`：`uv sync --locked`・`uv run ruff check .`・`uv run pytest`
 - テスト 165 件：LND のアダプタ（依頼の形、ノードの失敗、network の不一致、疎通、macaroon の読み込み）、アダプタ越しの mainnet の往復、`/healthz` のノード疎通、`LND_*` の設定を含む。Phase 1.5 までの内訳は Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry の範囲（1〜3600 秒）・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
 
@@ -136,10 +136,11 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 
 運用者の作業（手順は `docs/deploy.md`）。
 
-1. Voltage で mainnet の LND ノードを作り、公開鍵・REST の URL を控え、invoice 用に絞った macaroon を用意する。インバウンド流動性を用意する
-2. VPS を選んで用意する
+1. Voltage で mainnet の LND ノードを作り、公開鍵・REST の URL を控え、Macaroon Bakery で `invoices:read`・`invoices:write` だけの macaroon を焼き、API の接続元を VPS の固定 IP に絞る
+2. VPS を選んで用意する（固定 IP があること）
 3. Cloudflare Tunnel と Access（サービストークン、Service Auth のポリシー）を設定する
-4. HMAC 鍵を作り、VPS と JIN・OSD の Vercel に入れる
+4. チャネルを開き、自分のノードから数万 sats を外へ払ってインバウンドを作る（LSP から買うより安い）
+5. HMAC 鍵を作り、VPS と JIN・OSD の Vercel に入れる
 
 JIN・OSD のリポジトリ側の作業（このリポジトリではやらない。依頼として書き出す）。
 
@@ -174,7 +175,7 @@ JIN・OSD のリポジトリ側の作業（このリポジトリではやらな�
 
 | 項目 | 必要な判断 | 止まるもの |
 |---|---|---|
-| Lightning ノード | 決定：Voltage（mainnet）。残りはノードの作成、macaroon、インバウンド流動性の用意 | Phase 2 の往復 |
+| Lightning ノード | 決定：Voltage（mainnet）。残りはノードの作成、macaroon、接続元 IP の制限、インバウンド流動性の用意（`docs/deploy.md` §2） | Phase 2 の往復 |
 | ホスト | ファシリテーターを置く VPS（これから選ぶ。条件は `docs/deploy.md` §1）と、その前段の Cloudflare Tunnel・Access の設定（運用者が行う） | Phase 2 のデプロイ |
 | HMAC 鍵の配布 | 鍵の生成と、JIN・OSD の Vercel 環境変数とファシリテーター側の `LNBTC_HMAC_KEYS` への投入 | Phase 2 の往復 |
 | HMAC の署名対象 | method と path を含める追加（§3）を受け入れるか | JIN・OSD 側の実装 |

@@ -1,6 +1,6 @@
 # デプロイ手順（下書き）
 
-2026-10-28 時点の下書き。VPS はまだ決まっていない。Voltage と Cloudflare の画面の名前は変わることがあるので、手順どおりに見つからないときは各社のドキュメントで確かめる。確かめていない箇所は TODO と書いてある。
+2026-10-28 時点の下書き。VPS はまだ決まっていない。Voltage の項目は公開情報で埋めたもので、実ノードではまだ確かめていない。Voltage と Cloudflare の画面の名前は変わることがあるので、手順どおりに見つからないときは各社のドキュメントで確かめる。確かめていない箇所は TODO と書いてある。
 
 ## 0. 全体
 
@@ -27,18 +27,26 @@ Voltage は testnet を止めていて、代わりの Mutinynet（signet）は x
 - 1 台だけで動かす。台数を増やすときは SQLite を共有ストアに置き換える（CLAUDE.md §6 Phase 3）
 - 性能はほとんど要らない（最小構成で足りる見込み。TODO：実測）
 - 外から入るポートは SSH だけでよい。HTTP は Cloudflare Tunnel を通す
+- 固定の外向き IP アドレス（Voltage のノードの API を、この IP からだけ受け付けるように絞るため。§2 の 5）
 
 ## 2. Voltage（運用者の作業）
 
 1. Voltage でチームを作り、LND ノードを mainnet で作る
 2. ノードの公開鍵（66 桁の 16 進）を控える。これが `LNBTC_PAY_TO` で、JIN・OSD が 402 の `payTo` に載せる値でもある
 3. REST の URL（ノードの API エンドポイント。REST のポートは既定で 8080）を控える。これが `LND_REST_URL`
-4. macaroon を用意する。invoice の発行と照会だけに絞ったものを使う
-   - 第一候補：`lncli bakemacaroon invoices:read invoices:write --save_to invoice-only.macaroon` で焼く。Voltage では LNCLI でノードに入って焼ける（TODO：Voltage での具体的な入り方を確かめる）
-   - 代わり：Voltage の Macaroon Bakery の Invoice macaroon。LND 0.17 以降では `invoices:read`・`invoices:write` に加えて `address:read`・`address:write`・`onchain:read` も持つ。資金は動かせないが、要らない権限が付く
+4. macaroon を用意する。権限は `invoices:read` と `invoices:write` だけにする。疎通の確認は invoice の照会で行うので、`info:read` も要らない
+   - ダッシュボードの Manage Access → Macaroon Bakery で、この 2 つだけを持つ macaroon を焼く。lncli は要らない
+   - lncli で焼くなら `lncli bakemacaroon --save_to invoice-only.macaroon invoices:read invoices:write`。`--timeout` で有効期限も付けられる（期限を付けたら、切れる前に入れ替える手順が要る）
+   - 最初から用意されている Invoice macaroon は使わない。LND 0.17 以降ではアドレスの作成など、要らない権限も付いている
    - admin macaroon は使わない
-5. invoice を受け取るためのインバウンド流動性（相手側に残高があるチャネル）を用意する。無いと支払いが届かない（TODO：Voltage での用意の仕方と費用を調べる）
-6. Voltage 側で API への接続元を絞れるなら、VPS の IP だけに絞る（TODO：設定の有無を確かめる）
+5. ノードの API に接続できる IP を、VPS の固定 IP だけに絞る。ダッシュボードの設定（Settings）か、Voltage API の `POST /organizations/:organization_id/nodes/:node_id/whitelist` で変えられる。許可していない IP から呼ぶと 403 になり、ファシリテーターの `/healthz` は `"node": "unreachable"`（503）を返す
+6. invoice を受け取るためのインバウンド流動性（相手側に残高があるチャネル）を用意する。無いと支払いが届かない。やり方は 2 通り
+   - 安い方法（おすすめ）：自分のノードからチャネルを開き（オンチェーンの手数料がかかる）、取引所（River、Strike など）への入金やギフトカード（Bitrefill など）の購入で数万 sats を外へ払う。払った分がそのまま受け取れる容量になる。JIN の単価は 1 回 12〜24 sats で、上限も 1,000 sats なので、数万 sats で足りる
+   - LSP からチャネルを買う：Olympus、LNBig、Megalith など。Lightning Pool では 1M sats 分のインバウンドで 2,000〜5,000 sats ほどが目安とされる
+   - Voltage 自身のインバウンドの提供（以前の 500,000 sats の機能や Voltage Flow）は、今は使えないものとして扱う（Flow は終了。もう一方の機能は今も提供しているか未確認）
+   - 相手のノードによっては、小さすぎるチャネルを受け付けない（チャネルの最小額は相手ごとに違う。TODO：開く前に確かめる）
+
+Voltage の REST は信頼された CA が署名した TLS 証明書を使うので、`LND_TLS_CERT_PATH` は空のままでよい。
 
 macaroon と URL は VPS にだけ置く。Vercel には置かない。
 
@@ -68,7 +76,7 @@ LND_NETWORK=mainnet
 
 `LNBTC_ALLOW_MAINNET` は往復の直前まで `false` にしておく。`false` のままだと `/invoice` は mainnet の依頼を `unsupported_network` で断り、testnet の依頼は mainnet のノードに送らずに 502 を返す。`/healthz` でノードへの疎通（`"node": "ok"`）だけは先に確かめられる。
 
-macaroon は `/etc/lnbtc/invoice-only.macaroon`（`chmod 640`、グループ lnbtc）。Voltage の TLS 証明書が公的な CA のものなら `LND_TLS_CERT_PATH` は要らない（TODO：確かめる）。自己署名なら証明書のパスを入れる。
+macaroon は `/etc/lnbtc/invoice-only.macaroon`（`chmod 640`、グループ lnbtc）。`LND_TLS_CERT_PATH` は書かない（Voltage は信頼された CA の証明書。§2）。自己署名のノードに替えたときだけ、その証明書のパスを入れる。
 
 `/etc/systemd/system/lnbtc-facilitator.service`：
 
@@ -148,6 +156,14 @@ curl -s https://lnbtc.x402jp.com/healthz -H "CF-Access-Client-Id: <id>" -H "CF-A
 
 参考：<https://developers.cloudflare.com/cloudflare-one/identity/service-tokens/>
 
+## 4.5 運用者の作業のまとめ
+
+1. VPS を契約する（§1。固定 IP があること）
+2. Voltage で mainnet の LND ノードを作り、Macaroon Bakery で invoice 専用の macaroon を焼き、API の接続元を VPS の IP に絞る（§2）
+3. Cloudflare Tunnel と Access を設定する（§4）
+4. チャネルを開き、インバウンドを作るための最初の送金をする（§2 の 6）
+5. HMAC 鍵を作り、VPS と JIN・OSD の Vercel に入れる
+
 ## 5. mainnet の少額往復（Phase 2 の受け入れ）
 
 運用者の確認を取ってから行う。
@@ -163,3 +179,11 @@ curl -s https://lnbtc.x402jp.com/healthz -H "CF-Access-Client-Id: <id>" -H "CF-A
 
 - Lightning の受付を止めるだけなら `LNBTC_ALLOW_MAINNET=false` にして再起動する。JIN・OSD は `/invoice` の失敗で lnbtc を 402 から外す
 - リプレイストアを古いバックアップで戻さない（CLAUDE.md §7）
+
+## 出典
+
+- Voltage の Macaroon Bakery と macaroon の権限：<https://docs.voltage.cloud/macaroons>
+- Voltage API（接続元 IP の許可リスト）：<https://docs.voltage.cloud/voltage-api>
+- Voltage の testnet 停止と Mutinynet：<https://docs.voltage.cloud/dev-sandbox-mutinynet>
+- LND の REST（AddInvoice）：<https://lightning.engineering/api-docs/api/lnd/lightning/add-invoice/>
+- インバウンド流動性・TLS 証明書・`lncli bakemacaroon` の `--timeout` は、運用者が Voltage と LND の公開ドキュメントで調べたもの（2026-10-28）
