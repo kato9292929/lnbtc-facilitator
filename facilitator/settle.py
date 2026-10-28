@@ -160,17 +160,37 @@ def create_app(
         return model.model_validate_json(body)
 
     @app.get("/healthz")
-    def healthz() -> dict[str, Any]:
-        return {
-            "status": "ok",
+    def healthz() -> JSONResponse:
+        """生存確認。ノードを設定していて届かないときは 503 にして、JIN・OSD が lnbtc を
+        402 から外せるようにする（`node` が `unreachable`、`invoice_issuance` が false）。"""
+        node = _node_state()
+        degraded = node == "unreachable"
+        content = {
+            "status": "degraded" if degraded else "ok",
             "scheme": scheme.scheme,
             "networks": sorted(allowed),
             "clock_skew_seconds": clock_skew,
             "minimum_retention_seconds": minimum_retention_seconds,
             "authenticated": authenticator is not None,
             "max_sats_per_call": max_sats_per_call,
-            "invoice_issuance": receiver is not None,
+            # mainnet のノードを有効化前に置いた場合など、発行できる network が無ければ false。
+            "invoice_issuance": receiver is not None
+            and not degraded
+            and getattr(receiver, "network", None) in (None, *allowed),
+            "node": node,
         }
+        return JSONResponse(status_code=503 if degraded else 200, content=content)
+
+    def _node_state() -> str:
+        if receiver is None:
+            return "not_configured"
+        ping = getattr(receiver, "ping", None)
+        if ping is None:
+            return "unchecked"
+        try:
+            return "ok" if ping() else "unreachable"
+        except Exception:
+            return "unreachable"
 
     @app.post("/settle")
     async def settle(request: Request) -> JSONResponse:
