@@ -161,8 +161,10 @@ curl -s https://lnbtc.x402jp.com/healthz -H "CF-Access-Client-Id: <id>" -H "CF-A
 1. VPS を契約する（§1。固定 IP があること）
 2. Voltage で mainnet の LND ノードを作り、Macaroon Bakery で invoice 専用の macaroon を焼き、API の接続元を VPS の IP に絞る（§2）
 3. Cloudflare Tunnel と Access を設定する（§4）
-4. チャネルを開き、インバウンドを作るための最初の送金をする（§2 の 6）
+4. チャネルを開き、インバウンドを作るための最初の送金をする（§2 の 6）。要る資金は、開くチャネルの容量とオンチェーン手数料の合計
 5. HMAC 鍵を作り、VPS と JIN・OSD の Vercel に入れる
+
+順番は 1 → 2 → 3。2 の接続元 IP の制限は、1 で VPS の固定 IP が決まってからでないとできない。4 と 5 は 2 の後なら並行して進めてよい。
 
 ## 5. mainnet の少額往復（Phase 2 の受け入れ）
 
