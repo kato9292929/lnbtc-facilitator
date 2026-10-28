@@ -32,7 +32,12 @@ from x402.schemas import PaymentPayload, PaymentRequirements
 
 from facilitator.auth import AuthError, RateLimited, RateLimiter, RequestAuthenticator
 from facilitator.credit import CreditLedger
-from facilitator.invoice import IssuanceMismatch, check_issued_invoice, is_description_hash
+from facilitator.invoice import (
+    MAX_EXPIRY_SECONDS,
+    IssuanceMismatch,
+    check_issued_invoice,
+    is_description_hash,
+)
 from facilitator.pricing import MAX_SATS_PER_CALL, exceeds_call_cap
 from facilitator.replay import DEFAULT_MINIMUM_RETENTION_SECONDS, RetainingSQLiteReplayStore
 from facilitator.vendor.lnbtc.constants import (
@@ -230,7 +235,7 @@ def create_app(
             return _error(400, "amount_exceeds_call_cap")
         if not is_description_hash(parsed.descriptionHash):
             return _error(400, "invalid_description_hash")
-        if parsed.expirySeconds <= 0:
+        if not 0 < parsed.expirySeconds <= MAX_EXPIRY_SECONDS:
             return _error(400, "invalid_expiry")
         if receiver is None or pay_to is None:
             return _error(503, "invoice_issuance_unavailable")

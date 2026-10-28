@@ -235,11 +235,19 @@ def test_invoice_refuses_malformed_description_hash(client, receiver, digest) ->
     assert receiver.calls == []
 
 
-@pytest.mark.parametrize("expiry", [0, -1])
-def test_invoice_refuses_non_positive_expiry(client, receiver, expiry) -> None:
+@pytest.mark.parametrize("expiry", [0, -1, 3601, 10**12])
+def test_invoice_refuses_expiry_outside_range(client, receiver, expiry) -> None:
     result = signed(client, "/invoice", invoice_body(expirySeconds=expiry))
+    assert result.status_code == 400
     assert result.json()["errorReason"] == "invalid_expiry"
     assert receiver.calls == []
+
+
+@pytest.mark.parametrize("expiry", [1, 3600])
+def test_invoice_accepts_expiry_bounds(client, expiry) -> None:
+    result = signed(client, "/invoice", invoice_body(expirySeconds=expiry))
+    assert result.status_code == 200
+    assert decode_invoice(result.json()["invoice"]).expiry == expiry
 
 
 @pytest.mark.parametrize(

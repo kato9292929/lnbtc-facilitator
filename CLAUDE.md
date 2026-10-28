@@ -91,7 +91,7 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 - `facilitator/auth.py`・`facilitator/credit.py`・`facilitator/pricing.py`
 - `tests/fakes.py`：偽の受信側アダプタ（仕様のテスト専用鍵でローカル署名、LND と同じ feature を立てる）。本番の入口からは使わない
 - `.github/workflows/ci.yml`：`uv sync --locked`・`uv run ruff check .`・`uv run pytest`
-- テスト 130 件：Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
+- テスト 134 件：Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry の範囲（1〜3600 秒）・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
 
 まだ無いもの。
 
@@ -114,7 +114,7 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 
 2026-10-28 に完了。中身は §4。決めたことのうち仕様に無いもの。
 
-- `/invoice` の入力は `amount`（msat の文字列。数値は拒否）・`descriptionHash`・`expirySeconds`（整数）・`network`。未知のフィールドは拒否。返すのは `{"invoice": "..."}` だけ
+- `/invoice` の入力は `amount`（msat の文字列。数値は拒否）・`descriptionHash`・`expirySeconds`（1 以上 3600 以下の整数。BOLT11 の既定 expiry と同じ上限。保持期限を呼び出し元の指定で延ばさせないため）・`network`。未知のフィールドは拒否。返すのは `{"invoice": "..."}` だけ
 - 照合に使う署名鍵は `LNBTC_PAY_TO`（受信ノードの公開鍵）。JIN・OSD が 402 の `payTo` に載せる値と同じもの
 - エラー応答は `errorReason` だけ。入力の誤りは 400（`invalid_invoice_request`・`unsupported_network`・`invalid_exact_lnbtc_amount`・`amount_exceeds_call_cap`・`invalid_description_hash`・`invalid_expiry`）、ノードの失敗は 502 `invoice_issuance_failed`、照合の食い違いは 502 `invoice_issuance_mismatch`、アダプタ未設定は 503 `invoice_issuance_unavailable`
 - `/settle` の上限超過は 400 `amount_exceeds_call_cap`（消費しない）。金額の形式の誤りは従来どおり scheme 側の理由で返す

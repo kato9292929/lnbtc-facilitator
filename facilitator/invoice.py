@@ -29,6 +29,11 @@ _DESCRIPTION_HASH = re.compile(r"[0-9a-f]{64}")
 #: 自分のノードが出す invoice に要求する feature。支払い側（LDK など）が必須とするもの。
 REQUIRED_FEATURES = ("var_onion_optin", "payment_secret")
 
+#: `/invoice` で受け付ける expiry の上限（秒）。BOLT11 で expiry を省いたときの既定値と同じ。
+#: 消費キーの保持期限は invoice の期限から決まるので、上限が無いと呼び出し元の指定で
+#: リプレイストアの行をいくらでも長く残させられる。1 回の支払いに使う invoice には足りる。
+MAX_EXPIRY_SECONDS = 3600
+
 
 class IssuanceMismatch(Exception):
     """ノードが依頼と異なる invoice を返した。理由は内部用で、ワイヤには出さない。"""
