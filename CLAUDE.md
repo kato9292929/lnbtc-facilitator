@@ -1,6 +1,6 @@
 # CLAUDE.md — lnbtc-facilitator 作業指示書
 
-このファイルはリポジトリ直下に置く作業指示書で、Claude Code はこれをプロジェクトの前提として読む。チャット履歴は引き継がれないので、作業に必要な判断はすべてここに書く。2026-10-28 時点の状態に基づく。
+このファイルはリポジトリ直下に置く作業指示書で、Claude Code はこれをプロジェクトの前提として読む。チャット履歴は引き継がれないので、作業に必要な判断はすべてここに書く。2026-10-28 時点（Phase 1.5 完了）の状態に基づく。
 
 ## 0. これは何か
 
@@ -66,35 +66,38 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 |---|---|---|
 | 保持期限 | 24 時間固定。ただし仕様の下限（`invoice_end + skew + 1h`）のほうが後なら下限を採る | `facilitator/replay.py` |
 | 価格 | series 12000 msat（12 sats）/ movers 24000 msat（24 sats）。基準 BTC/USD 84,464.00（Bybit、2026-09-27）。見直しは月初と、基準から ±30% 乖離したとき | `facilitator/pricing.py`、`docs/lnbtc-pricing.md` |
-| mainnet の上限 | 1 コール 1,000 sats 以下 | `pricing.exceeds_call_cap()` はあるが、まだどこからも使っていない（Phase 1.5） |
+| 1 コール上限 | 1 コール 1,000 sats 以下。testnet にも同じ上限をかける | `/settle` と `/invoice` で `pricing.exceeds_call_cap()` を呼ぶ。`LNBTC_MAX_SATS_PER_CALL` |
 | 呼び出し元の認証 | 外側は Cloudflare Access のサービストークン、内側は HMAC | `facilitator/auth.py` |
 | HMAC | ヘッダ `X-JIN-Signature: t=<unix秒>,k=<鍵ID>,v1=<16進>`。署名対象は timestamp・method・path・body。時刻ずれ 30 秒超は拒否。定数時間比較。鍵を 2 本同時に受理して入れ替える | 同上 |
 | レート制限 | 鍵 ID ごと、超過は 429。既定 120 回 / 60 秒（根拠のある数字ではない） | 同上 |
 | エラー応答 | `errorReason` だけ返す。`error_message` と `payer` は出さない | `facilitator/settle.py` |
 | 消費後に提供できなかった分 | クレジット台帳に記録し、次の再送で 1 回だけ消費なしに提供する。`/settle` の意味は変えない（仕様が二重提出に `duplicate_settlement` を求めるため） | `facilitator/credit.py`、`POST /credits`・`POST /credits/claim` |
 | mainnet の誤投入防止 | 既定は testnet だけ受け付ける。`allow_mainnet=True` のときだけ mainnet を通す | `facilitator/settle.py` |
+| 発行した invoice の照合 | ノードが返した invoice を decode し、description hash・金額・expiry・通貨・署名鍵（`LNBTC_PAY_TO`）・作成時刻（skew 以内）・feature を確かめてから返す。食い違えば 502 で invoice を出さない | `facilitator/invoice.py` |
+| feature フィールド | `/settle` は仕様どおり `9` の無い invoice も受理する（緩めも締めもしない）。自分のノードが出す invoice には `var_onion_optin` と `payment_secret` を要求する（LDK などの支払い側が必須とするため）。仕様の要件ではなく発行側の方針 | 同上 |
 
 署名対象に method と path を含めたのは、運用者の指示書（v3、timestamp + body）への追加。body だけだと、`/settle` 向けの署名をそのまま `/credits/claim` へ投げ替えられるため。JIN・OSD 側の署名の作り方もこれに合わせる。
 
 ## 4. 今の状態（2026-10-28）
 
-できていること（Phase 1、ノード無し）。
+できていること（Phase 1・1.5、ノード無し）。
 
 - `facilitator/vendor/lnbtc/`：x402 本体の未マージ PR #1873（`refs/pull/1873/head` = `2d85314`）の `mechanisms/lnbtc`。BOLT11 の decode と署名検証、バインディング、preimage 検証、SQLite のリプレイストア（`INSERT OR IGNORE` による消費）
 - `facilitator/replay.py`：保持期限の下限と、期限切れの行だけを消す `purge()`
-- `facilitator/settle.py`：`create_app()`。`/healthz`・`/settle`・`/credits`・`/credits/claim`、`/verify` は 400
+- `facilitator/settle.py`：`create_app()`。`/healthz`・`/settle`・`/invoice`・`/credits`・`/credits/claim`、`/verify` は 400。1 コール上限を `/settle` と `/invoice` で強制
+- `facilitator/invoice.py`：発行した invoice の照合（§3）
+- `facilitator/main.py`：起動の入口。環境変数（`.env.example`）を読み、HMAC 鍵が無ければ起動を止める。uvicorn は 1 プロセス
+- `facilitator/purge.py`：掃除を 1 回だけ行うコマンド（`python -m facilitator.purge`）。ストアのファイルが無ければ作らずに止める
 - `facilitator/auth.py`・`facilitator/credit.py`・`facilitator/pricing.py`
-- テスト 57 件：仕様ベクタとの一致、否定系、境界時刻の両側、消費キーのネットワーク分離、同時実行（成功は 1 件だけ）、再起動をまたいだ消費済みの保持、保持期限と掃除、HTTP の口・認証・429
+- `tests/fakes.py`：偽の受信側アダプタ（仕様のテスト専用鍵でローカル署名、LND と同じ feature を立てる）。本番の入口からは使わない
+- `.github/workflows/ci.yml`：`uv sync --locked`・`uv run ruff check .`・`uv run pytest`
+- テスト 134 件：Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry の範囲（1〜3600 秒）・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
 
 まだ無いもの。
 
-- invoice 発行の口（構成図の ②）
-- 起動の入口と、環境変数からの設定の読み込み（`create_app()` は引数で受け取るだけ）
-- 1 コール上限の強制
-- 掃除（`purge()`）の定期実行
-- BOLT11 の feature フィールドの非互換を固定するテスト
-- Lightning ノードへの接続（受信側のアダプタ）
-- CI
+- Lightning ノードへの接続（受信側のアダプタ）。それまで `/invoice` は 503 `invoice_issuance_unavailable` を返し、`/healthz` の `invoice_issuance` は false
+- 掃除の定期実行の設定（cron か systemd timer。`docs/deploy.md` と一緒に Phase 2 で書く）
+- クレジット台帳の掃除（いまは消さない。件数が増えたら考える）
 
 ## 5. 作業の進め方
 
@@ -107,42 +110,23 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 
 ## 6. フェーズ
 
-### Phase 1.5：ノード無しで足せる残り（いま着手できる）
+### Phase 1.5：ノード無しで足せる残り（完了）
 
-1. 受信側アダプタの口を切る。`facilitator/vendor/lnbtc/types.py` の `LightningReceiver`（`create_invoice(amount_msat, description_hash, expiry_seconds, network)`）を実装する形にする。テスト用に、仕様のテスト専用鍵でローカル署名する偽のアダプタを置く（`tests/test_lnbtc_facilitator.py` の `make_invoice` と同じ作り方）
-2. invoice 発行の口 `POST /invoice` を足す。入力は `amount`（msat の文字列）・`descriptionHash`（64 桁の小文字 16 進）・`expirySeconds`・`network`。HMAC 認証とレート制限は `/settle` と同じにする。返すのは invoice の文字列だけ
-   - ファシリテーターはリクエストハッシュを計算しない。JIN・OSD が計算したハッシュを受け取って invoice に載せるだけ
-   - 許可していない network（既定では mainnet）、正の整数でない amount、1 コール上限を超える amount は拒否する
-   - 発行した invoice を decode し直して、description hash・金額・expiry・通貨・署名鍵が依頼どおりかを確かめてから返す（ノードの設定ずれを外に出さない）
-3. 起動の入口を足す。`facilitator/main.py` で環境変数から設定を読み、`create_app()` に渡す。変数名の案は次のとおりで、`.env.example` に値なしで書く
+2026-10-28 に完了。中身は §4。決めたことのうち仕様に無いもの。
 
-| 変数 | 内容 |
-|---|---|
-| `LNBTC_STORE_PATH` | リプレイストアの SQLite ファイル（永続ディスク上） |
-| `LNBTC_CREDIT_PATH` | クレジット台帳の SQLite ファイル |
-| `LNBTC_HMAC_KEYS` | `鍵ID:秘密,鍵ID:秘密` の形。入れ替え中は 2 本 |
-| `LNBTC_ALLOW_MAINNET` | `true` のときだけ mainnet を受け付ける。既定 false |
-| `LNBTC_SKEW_SECONDS` | 既定 60。設定は 1 つだけ |
-| `LNBTC_MAX_SATS_PER_CALL` | 既定 1000 |
-| `LNBTC_RATE_LIMIT` / `LNBTC_RATE_LIMIT_WINDOW_SECONDS` | 既定 120 / 60 |
-| `LND_REST_URL` / `LND_MACAROON_PATH` / `LND_TLS_CERT_PATH` | Phase 2 で使う。macaroon は invoice 発行と照会に絞ったもの |
-
-   - HMAC 鍵が 1 本も無いときは起動を止める。いまの `create_app()` は鍵が無いと認証なしで動くが、それはテスト用に限る
-   - uvicorn は 1 プロセスで動かす。レート制限がプロセス内のメモリにあるため
-4. 1 コール上限を `/settle` と `/invoice` の両方で強制する（`pricing.exceeds_call_cap()`）
-5. 掃除の定期実行。`python -m facilitator.purge` のような 1 回きりのコマンドにして、ホストの cron か systemd timer から 1 時間ごとに呼ぶ。期限内の行を消さないことは `purge()` のテストで固定済み
-6. BOLT11 の feature フィールドの非互換をテストに固定する。仕様の初期フィクスチャは feature フィールドを省いていて、LDK などの実装は invalid features として拒否する。検証を緩めて通すのではなく、「この invoice はどこで拒否されるか」をテストに残す
-7. CI を足す（GitHub Actions で `uv run pytest` と `uv run ruff check .`）
-
-受け入れ条件：ノードに接続せず、偽のアダプタで「invoice 発行 → 支払い（preimage を使う）→ `/settle` 成功 → 同じ証明で `duplicate_settlement`」が HTTP の口を通して通る。上限・network・認証の否定系も通る。
+- `/invoice` の入力は `amount`（msat の文字列。数値は拒否）・`descriptionHash`・`expirySeconds`（1 以上 3600 以下の整数。BOLT11 の既定 expiry と同じ上限。保持期限を呼び出し元の指定で延ばさせないため）・`network`。未知のフィールドは拒否。返すのは `{"invoice": "..."}` だけ
+- 照合に使う署名鍵は `LNBTC_PAY_TO`（受信ノードの公開鍵）。JIN・OSD が 402 の `payTo` に載せる値と同じもの
+- エラー応答は `errorReason` だけ。入力の誤りは 400（`invalid_invoice_request`・`unsupported_network`・`invalid_exact_lnbtc_amount`・`amount_exceeds_call_cap`・`invalid_description_hash`・`invalid_expiry`）、ノードの失敗は 502 `invoice_issuance_failed`、照合の食い違いは 502 `invoice_issuance_mismatch`、アダプタ未設定は 503 `invoice_issuance_unavailable`
+- `/settle` の上限超過は 400 `amount_exceeds_call_cap`（消費しない）。金額の形式の誤りは従来どおり scheme 側の理由で返す
+- 環境変数の真偽値は `true` / `false` だけ受け付ける（`1` や `yes` は起動を止める）。待ち受けは `LNBTC_HOST` / `LNBTC_PORT`（既定 127.0.0.1:8000）
 
 ### Phase 2：testnet での往復（運用者の準備が要る）
 
 このリポジトリ側の作業。
 
-1. LND の REST に invoice を発行するアダプタを書く（`AddInvoice` に `value_msat`・`description_hash`・`expiry` を渡す）。macaroon は invoice の発行と照会だけに絞ったものを使う
+1. LND の REST に invoice を発行するアダプタを書く（`AddInvoice` に `value_msat`・`description_hash`・`expiry` を渡す）。macaroon は invoice の発行と照会だけに絞ったものを使う。`facilitator/vendor/lnbtc/types.py` の `LightningReceiver` を満たし、`facilitator/main.py` で `create_app(receiver=...)` に渡す
 2. `/healthz` にノードへの疎通を足す。ノードに届かないときは、JIN・OSD が Lightning の選択肢を 402 から外せるよう、はっきり分かる応答にする
-3. VPS へのデプロイ手順を `docs/deploy.md` に書く（systemd、永続ディスク上の SQLite、時刻同期、Cloudflare Access の前段）
+3. VPS へのデプロイ手順を `docs/deploy.md` に書く（systemd、永続ディスク上の SQLite、時刻同期、Cloudflare Access の前段、`python -m facilitator.purge` を 1 時間ごとに呼ぶ timer）
 
 JIN・OSD のリポジトリ側の作業（このリポジトリではやらない。依頼として書き出す）。
 
