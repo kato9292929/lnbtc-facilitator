@@ -1,0 +1,9 @@
+facilitator/vendor/lnbtc/ は x402-foundation/x402 の
+python/x402/mechanisms/lnbtc（PR #1873、refs/pull/1873/head = 2d85314c42fab607395c78cb09ecc926110252ff）
+をそのまま取り込んだものです。相対 import を x402.* の絶対 import に書き換えた以外の変更はありません。
+
+x402 は Apache License 2.0 で配布されています。
+https://github.com/x402-foundation/x402/blob/main/LICENSE
+http://www.apache.org/licenses/LICENSE-2.0
+
+このリポジトリのそれ以外の部分のライセンスは未定です（LICENSE ファイルは置いていません）。

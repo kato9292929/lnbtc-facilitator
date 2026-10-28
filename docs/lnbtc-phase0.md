@@ -1,3 +1,9 @@
+> 2026-10-28 に kato9292929/Japan-Inflation-Nowcast（ブランチ `claude/sharp-ptolemy-076aoj`）から
+> このリポジトリへ移した。以下の本文は移設前に書いたもので、パスは JIN のリポジトリ基準のまま残している。
+> `facilitator/`・`tests/test_lnbtc_*.py`・`docs/lnbtc-*.md` はこのリポジトリに、
+> `src/lib/jcs.ts`・`src/lib/lnbtc.ts`・`tests-ts/lnbtc-binding.test.ts`（resource server 側の
+> TypeScript）は JIN のリポジトリに残っている。
+
 # x402 exact/lnbtc — Phase 0 読解結果と指示書との差分
 
 対象仕様: `x402-foundation/x402` の `specs/schemes/exact/scheme_exact_lnbtc.md`

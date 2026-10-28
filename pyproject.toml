@@ -1,0 +1,47 @@
+[project]
+name = "lnbtc-facilitator"
+version = "0.2.0"
+description = "x402 exact/lnbtc (Bitcoin Lightning) facilitator for JIN and OSD. Single-host service; replay store on SQLite."
+readme = "README.md"
+requires-python = ">=3.12"
+
+# x402 本体の Python SDK は pypi 版を使い、未マージの mechanisms/lnbtc だけ vendoring する（facilitator/vendor/）。
+dependencies = [
+    "x402==2.24.0",
+    "bolt11>=2.2.0",
+    # bitstring 5.0 で ConstBitStream が無くなり bolt11 2.2.0 の import が壊れる。
+    "bitstring>=4.2,<5",
+    "bech32>=1.2.0",
+    "coincurve>=21.0.0",
+    "rfc8785>=0.1.2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.27",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["facilitator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# vendoring 領域は上流（x402 PR #1873）との差分を保つため整形・lint しない。
+exclude = ["facilitator/vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]

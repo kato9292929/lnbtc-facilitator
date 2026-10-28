@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+# 秘密情報（HMAC 鍵・ノード資格情報）はコミットしない。
+.env
+.env.*
+!.env.example
+# リプレイストア・クレジット台帳の実体（再起動耐性のため永続ファイル）。
+*.db
+*.db.credits
+*.sqlite
