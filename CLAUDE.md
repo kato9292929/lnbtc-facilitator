@@ -1,6 +1,6 @@
 # CLAUDE.md — lnbtc-facilitator 作業指示書
 
-このファイルはリポジトリ直下に置く作業指示書で、Claude Code はこれをプロジェクトの前提として読む。チャット履歴は引き継がれないので、作業に必要な判断はすべてここに書く。2026-10-28 時点（Phase 1.5 完了）の状態に基づく。
+このファイルはリポジトリ直下に置く作業指示書で、Claude Code はこれをプロジェクトの前提として読む。チャット履歴は引き継がれないので、作業に必要な判断はすべてここに書く。2026-10-28 時点（Phase 1.5 完了、Phase 2 のコード側の作業を実装済み）の状態に基づく。
 
 ## 0. これは何か
 
@@ -17,7 +17,7 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
    │ ① GET /api/jin/series
    ▼
 [JIN・OSD（Next.js on Vercel）]  ── ② invoice 発行（HMAC 付き）──▶ [このファシリテーター（単一ホストの VPS）]
-   │  402 を出す側（resource server）                               Lightning ノード（LND 想定）
+   │  402 を出す側（resource server）                               ──▶ Voltage の LND（mainnet、REST）
    │ ③ 402 + extra.invoice                                         SQLite（リプレイストア・クレジット台帳）
    ▼                                                                    ▲
 [エージェント] ④ invoice を支払う ⑤ preimage を付けて再送               │
@@ -31,7 +31,8 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 |---|---|---|
 | 402 を出す、リクエストハッシュを再計算する | JIN・OSD のリポジトリ（TypeScript） | JIN では `src/lib/jcs.ts`・`src/lib/lnbtc.ts`。このリポジトリには無い |
 | invoice の発行、証明の検証と消費 | このリポジトリ（Python） | `facilitator/` |
-| ノードの資格情報、リプレイストア | このリポジトリが動くホストだけ | Vercel には置かない |
+| ノードの資格情報（invoice 用 macaroon）、リプレイストア | このリポジトリが動くホストだけ | Vercel には置かない |
+| Lightning ノード | Voltage（ホスティングの LND、mainnet） | ファシリテーターからインターネット越しに REST で呼ぶ。ノードとホストは同居しない |
 
 このリポジトリを分けた理由は次の 3 つ。
 
@@ -87,16 +88,19 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 - `facilitator/settle.py`：`create_app()`。`/healthz`・`/settle`・`/invoice`・`/credits`・`/credits/claim`、`/verify` は 400。1 コール上限を `/settle` と `/invoice` で強制
 - `facilitator/invoice.py`：発行した invoice の照合（§3）
 - `facilitator/main.py`：起動の入口。環境変数（`.env.example`）を読み、HMAC 鍵が無ければ起動を止める。uvicorn は 1 プロセス
+- `facilitator/lnd.py`：LND の REST の受信側アダプタ（Voltage 想定）。`POST /v1/invoices` に `value_msat`・`description_hash`（base64）・`expiry` だけを送る（`memo` は送らない）。疎通は `GET /v1/invoices?num_max_invoices=1`（invoice 用の macaroon で通るため）。設定した network 以外の依頼はノードに送らずに拒否する。https のみ。タイムアウト 2 秒
+- `/healthz`：ノードに届かないときは 503・`"status": "degraded"`・`"node": "unreachable"`・`"invoice_issuance": false`。mainnet のノードを有効化前に置いたときも `invoice_issuance` は false
 - `facilitator/purge.py`：掃除を 1 回だけ行うコマンド（`python -m facilitator.purge`）。ストアのファイルが無ければ作らずに止める
 - `facilitator/auth.py`・`facilitator/credit.py`・`facilitator/pricing.py`
 - `tests/fakes.py`：偽の受信側アダプタ（仕様のテスト専用鍵でローカル署名、LND と同じ feature を立てる）。本番の入口からは使わない
+- `docs/deploy.md`：VPS（systemd、掃除の timer）、Voltage、Cloudflare Tunnel と Access、mainnet の少額往復の手順の下書き。TODO が残っている
 - `.github/workflows/ci.yml`：`uv sync --locked`・`uv run ruff check .`・`uv run pytest`
-- テスト 134 件：Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry の範囲（1〜3600 秒）・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
+- テスト 165 件：LND のアダプタ（依頼の形、ノードの失敗、network の不一致、疎通、macaroon の読み込み）、アダプタ越しの mainnet の往復、`/healthz` のノード疎通、`LND_*` の設定を含む。Phase 1.5 までの内訳は Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry の範囲（1〜3600 秒）・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
 
 まだ無いもの。
 
-- Lightning ノードへの接続（受信側のアダプタ）。それまで `/invoice` は 503 `invoice_issuance_unavailable` を返し、`/healthz` の `invoice_issuance` は false
-- 掃除の定期実行の設定（cron か systemd timer。`docs/deploy.md` と一緒に Phase 2 で書く）
+- 実ノードでの確認。LND のアダプタは REST の仕様に合わせて書き、偽の LND でしか確かめていない（TODO：Voltage の実ノードで発行・疎通を確かめる）
+- VPS の上での実際のデプロイ
 - クレジット台帳の掃除（いまは消さない。件数が増えたら考える）
 
 ## 5. 作業の進め方
@@ -120,29 +124,37 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 - `/settle` の上限超過は 400 `amount_exceeds_call_cap`（消費しない）。金額の形式の誤りは従来どおり scheme 側の理由で返す
 - 環境変数の真偽値は `true` / `false` だけ受け付ける（`1` や `yes` は起動を止める）。待ち受けは `LNBTC_HOST` / `LNBTC_PORT`（既定 127.0.0.1:8000）
 
-### Phase 2：testnet での往復（運用者の準備が要る）
+### Phase 2：mainnet での少額往復（運用者の準備が要る）
 
-このリポジトリ側の作業。
+2026-10-28 に決定。ノードは Voltage。Voltage は testnet を止めていて、代わりの Mutinynet（signet）は仕様に無い network なので使わない（Mutinynet を受け付けるように改造しない）。testnet の往復はやめ、mainnet で 1 回 12 sats の往復をして確かめる。1 コール上限（1,000 sats）がかかっているので、誤っても損は小さい。testnet の経路は偽のアダプタのテストで守る。
 
-1. LND の REST に invoice を発行するアダプタを書く（`AddInvoice` に `value_msat`・`description_hash`・`expiry` を渡す）。macaroon は invoice の発行と照会だけに絞ったものを使う。`facilitator/vendor/lnbtc/types.py` の `LightningReceiver` を満たし、`facilitator/main.py` で `create_app(receiver=...)` に渡す
-2. `/healthz` にノードへの疎通を足す。ノードに届かないときは、JIN・OSD が Lightning の選択肢を 402 から外せるよう、はっきり分かる応答にする
-3. VPS へのデプロイ手順を `docs/deploy.md` に書く（systemd、永続ディスク上の SQLite、時刻同期、Cloudflare Access の前段、`python -m facilitator.purge` を 1 時間ごとに呼ぶ timer）
+このリポジトリ側の作業（実装済み。実ノードでは未確認）。
+
+1. LND の REST の受信側アダプタ（`facilitator/lnd.py`）と、`facilitator/main.py` からの組み立て（`LND_REST_URL`・`LND_MACAROON_PATH`・`LND_TLS_CERT_PATH`・`LND_NETWORK`）
+2. `/healthz` のノード疎通（§4）
+3. `docs/deploy.md` の下書き
+
+運用者の作業（手順は `docs/deploy.md`）。
+
+1. Voltage で mainnet の LND ノードを作り、公開鍵・REST の URL を控え、invoice 用に絞った macaroon を用意する。インバウンド流動性を用意する
+2. VPS を選んで用意する
+3. Cloudflare Tunnel と Access（サービストークン、Service Auth のポリシー）を設定する
+4. HMAC 鍵を作り、VPS と JIN・OSD の Vercel に入れる
 
 JIN・OSD のリポジトリ側の作業（このリポジトリではやらない。依頼として書き出す）。
 
 1. 402 の accepts に lnbtc の項目を 1 件足す。invoice はファシリテーターの `/invoice` から 402 のたびに取る。1 秒でタイムアウトし、失敗したら lnbtc を外して Solana だけで 402 を返す
 2. 支払い付きの再送で、リクエストハッシュを実際のリクエストから再計算して `/settle` に送る。公開オリジンは設定値で固定し、転送ヘッダによる上書きを拒否する（JIN の `httpBinding` は `publicOrigin` を必須にしてある）
 3. `/settle` が成功してからハンドラを実行する。ハンドラが失敗したら `/credits` に記録し、`duplicate_settlement` が返ったときは `/credits/claim` を叩く
-4. 署名の作り方を §3 の HMAC に合わせる
+4. 署名の作り方を §3 の HMAC に合わせる。Cloudflare Access のサービストークン（`CF-Access-Client-Id`・`CF-Access-Client-Secret`）もヘッダに載せる
 
-受け入れ条件：testnet で 1 件のエンドツーエンドの決済が成立し、消費が記録に残る。同じ preimage での再送が `duplicate_settlement` になり、invoice の期限切れのあとは新しい 402 が出ることを実環境で確かめる。往復の記録を保存する。
+受け入れ条件：運用者の確認を取ってから `LNBTC_ALLOW_MAINNET=true` にし、mainnet で 1 件のエンドツーエンドの決済（12 sats）が成立して消費が記録に残る。同じ preimage での再送が `duplicate_settlement` になり、invoice の期限切れのあとは新しい 402 が出て、1,000 sats を超える `/invoice` が `amount_exceeds_call_cap` になることを実環境で確かめる。往復の記録を保存する（preimage は残さない）。
 
 ### Phase 3：mainnet での提供
 
-1. `LNBTC_ALLOW_MAINNET=true` に切り替え、1 コール上限が効いていることを確かめる
-2. JIN の 402 に Solana と lnbtc を並べ、どちらで払っても同じデータが返ることを確かめる
-3. 監視：invoice の発行数、成立数、検証失敗の理由別の件数、`duplicate_settlement` の件数、ノードへの疎通、`/settle` の応答時間
-4. 複数ホストにする場合は、SQLite を共有のトランザクショナルなストアに置き換える。複数ホストで SQLite を共有してはならない
+1. JIN の 402 に Solana と lnbtc を並べ、どちらで払っても同じデータが返ることを確かめる
+2. 監視：invoice の発行数、成立数、検証失敗の理由別の件数、`duplicate_settlement` の件数、ノードへの疎通、`/settle` の応答時間
+3. 複数ホストにする場合は、SQLite を共有のトランザクショナルなストアに置き換える。複数ホストで SQLite を共有してはならない
 
 受け入れ条件：mainnet の実支払いが 1 件成立し、同じエンドポイントが Solana でも払える。
 
@@ -162,8 +174,8 @@ JIN・OSD のリポジトリ側の作業（このリポジトリではやらな�
 
 | 項目 | 必要な判断 | 止まるもの |
 |---|---|---|
-| Lightning ノード | 自前の VPS に LND（第一候補）、Voltage、Lexe のどれにするか。既存の VPS があるか | Phase 2 全体 |
-| ホスト | ファシリテーターを置く VPS（ノードと同居が前提）と、その前段の Cloudflare Access の設定 | Phase 2 のデプロイ |
+| Lightning ノード | 決定：Voltage（mainnet）。残りはノードの作成、macaroon、インバウンド流動性の用意 | Phase 2 の往復 |
+| ホスト | ファシリテーターを置く VPS（これから選ぶ。条件は `docs/deploy.md` §1）と、その前段の Cloudflare Tunnel・Access の設定（運用者が行う） | Phase 2 のデプロイ |
 | HMAC 鍵の配布 | 鍵の生成と、JIN・OSD の Vercel 環境変数とファシリテーター側の `LNBTC_HMAC_KEYS` への投入 | Phase 2 の往復 |
 | HMAC の署名対象 | method と path を含める追加（§3）を受け入れるか | JIN・OSD 側の実装 |
 | レート制限の値 | 既定 120 回 / 60 秒でよいか | Phase 3 |
