@@ -1,191 +1,131 @@
-# デプロイ手順（下書き）
+# デプロイ手順（phoenixd on XServer VPS クラウド）
 
-2026-10-28 時点の下書き。VPS はまだ決まっていない。Voltage の項目は公開情報で埋めたもので、実ノードではまだ確かめていない。Voltage と Cloudflare の画面の名前は変わることがあるので、手順どおりに見つからないときは各社のドキュメントで確かめる。確かめていない箇所は TODO と書いてある。
+2026-11-05 時点。ノードは Voltage をやめ、phoenixd（ACINQ）を facilitator と同じ VPS に置く。スクリプトは `deploy/` にあり、VPS ではまだ流していない（このセッションからは VPS に届かないため）。確かめていない箇所は TODO と書いてある。
 
 ## 0. 全体
 
 ```
 [JIN・OSD（Vercel）]
-   │ HTTPS + CF-Access-Client-Id / CF-Access-Client-Secret + X-JIN-Signature
+   │ HTTPS + X-JIN-Signature（HMAC）
    ▼
-[Cloudflare Access]（サービストークンを持つリクエストだけ通す）
-   │ Cloudflare Tunnel（VPS 側からの外向き接続。VPS のポートは開けない）
-   ▼
-[VPS：ファシリテーター]  127.0.0.1:8000 で待ち受け、SQLite は永続ディスク
-   │ HTTPS + invoice 用 macaroon
-   ▼
-[Voltage：LND（mainnet）]
+[XServer VPS クラウド lnbtc-facilitator 153.115.37.3（Ubuntu 24.04）]
+   パケットフィルター lnbtc：22（運用者の IP/32 だけ）・80・443
+   ├ Caddy :443（lnbtc.x402jp.com、Let's Encrypt）
+   │   ▼
+   ├ facilitator 127.0.0.1:8000（SQLite は /var/lib/lnbtc）
+   │   ▼ 限定パスワード
+   └ phoenixd 127.0.0.1:9740（外へ出さない。シードは /var/lib/phoenixd/.phoenix/seed.dat）
+        ▼
+     ACINQ の LSP（チャネルの相手。auto-liquidity でチャネルを開く）
 ```
 
-Voltage は testnet を止めていて、代わりの Mutinynet（signet）は x402 の lnbtc 仕様に無い network なので使わない。testnet の往復は行わず、mainnet の少額の往復で確かめる（CLAUDE.md §6 Phase 2）。
+Cloudflare Access は使わない（Caddy で直接公開する）。呼び出し元の認証は HMAC だけになる。Vercel の送信元 IP は固定できないので、443 を IP で絞ることもしない。
 
-## 1. VPS に求める条件
+## 1. phoenixd について確かめたこと
 
-- 永続ディスク（リプレイストアの SQLite を置く。再起動や再作成で消えないこと）
-- systemd が動く Linux（以下は Ubuntu LTS を想定）
-- NTP による時刻同期（skew の判定に使う。`timedatectl` で `System clock synchronized: yes`）
-- 1 台だけで動かす。台数を増やすときは SQLite を共有ストアに置き換える（CLAUDE.md §6 Phase 3）
-- 性能はほとんど要らない（最小構成で足りる見込み。TODO：実測）
-- 外から入るポートは SSH だけでよい。HTTP は Cloudflare Tunnel を通す
-- 固定の外向き IP アドレス（Voltage のノードの API を、この IP からだけ受け付けるように絞るため。§2 の 5）
+phoenixd v0.9.3 のソース（`src/commonMain/kotlin/fr/acinq/phoenixd/Api.kt`・`Phoenixd.kt`）で確かめた。公式の API ページ（phoenix.acinq.co/server/api）はこの環境から読めなかった。
 
-## 2. Voltage（運用者の作業）
+- 認証は HTTP basic で、パスワードだけを見る。`http-password`（full access）と `http-password-limited-access`（限定）の 2 本。どちらも指定しなければ初回起動で `phoenix.conf` に作られる
+- 限定パスワードで呼べないのは送金系（`payinvoice`・`payoffer`・`paylnaddress`・`lnurlpay`・`lnurlauth`・`sendtoaddress`・`bumpfee`・`closechannel`）。`createinvoice`・`getinfo`・`getbalance`・`estimateliquidityfees`・`payments/incoming/*` は呼べる
+- `GET /payments/incoming/{paymentHash}` は、支払い前でも preimage を返す。限定パスワードを持つ者は、払わずに `/settle` を通せる。facilitator は応答から preimage を捨てる（`facilitator/phoenixd.py`）。限定パスワードのファイルは root と lnbtc だけが読める
+- `POST /createinvoice` は form-urlencoded。`description` と `descriptionHash` は片方だけ。金額は `amountSat`（sat の整数）だけ
+- API は既定で 127.0.0.1:9740。`--chain` の既定は mainnet（testnet は testnet3）
+- auto-liquidity の既定は 2m sat。チャネルを開く費用の上限は既定で auto-liquidity の 1%（マイニング手数料）。fee credit の上限は既定で 2.5%（2m なら 50,000 sat）
+- 起動時にデータディレクトリを 0700、ファイルを 0600 にする（v0.9.3 のリリースノート）
+- リリースの `SHA256SUMS.asc` は 6AA4 5A4C 209A 2D30 64CF 66BE E434 ED29 2E85 643A（Pierre-Marie Padiou, ACINQ）の署名。v0.9.3 の `phoenixd-0.9.3-linux-x64.zip` の SHA-256 は `4eef88f1…25081b2`。2026-11-05 にここで署名とハッシュを確かめた
 
-1. Voltage でチームを作り、LND ノードを mainnet で作る
-2. ノードの公開鍵（66 桁の 16 進）を控える。これが `LNBTC_PAY_TO` で、JIN・OSD が 402 の `payTo` に載せる値でもある
-3. REST の URL（ノードの API エンドポイント。REST のポートは既定で 8080）を控える。これが `LND_REST_URL`
-4. macaroon を用意する。権限は `invoices:read` と `invoices:write` だけにする。疎通の確認は invoice の照会で行うので、`info:read` も要らない
-   - ダッシュボードの Manage Access → Macaroon Bakery で、この 2 つだけを持つ macaroon を焼く。lncli は要らない
-   - lncli で焼くなら `lncli bakemacaroon --save_to invoice-only.macaroon invoices:read invoices:write`。`--timeout` で有効期限も付けられる（期限を付けたら、切れる前に入れ替える手順が要る）
-   - 最初から用意されている Invoice macaroon は使わない。LND 0.17 以降ではアドレスの作成など、要らない権限も付いている
-   - admin macaroon は使わない
-5. ノードの API に接続できる IP を、VPS の固定 IP だけに絞る。ダッシュボードの設定（Settings）か、Voltage API の `POST /organizations/:organization_id/nodes/:node_id/whitelist` で変えられる。許可していない IP から呼ぶと 403 になり、ファシリテーターの `/healthz` は `"node": "unreachable"`（503）を返す
-6. invoice を受け取るためのインバウンド流動性（相手側に残高があるチャネル）を用意する。無いと支払いが届かない。やり方は 2 通り
-   - 安い方法（おすすめ）：自分のノードからチャネルを開き（オンチェーンの手数料がかかる）、取引所（River、Strike など）への入金やギフトカード（Bitrefill など）の購入で数万 sats を外へ払う。払った分がそのまま受け取れる容量になる。JIN の単価は 1 回 12〜24 sats で、上限も 1,000 sats なので、数万 sats で足りる
-   - LSP からチャネルを買う：Olympus、LNBig、Megalith など。Lightning Pool では 1M sats 分のインバウンドで 2,000〜5,000 sats ほどが目安とされる
-   - Voltage 自身のインバウンドの提供（以前の 500,000 sats の機能や Voltage Flow）は、今は使えないものとして扱う（Flow は終了。もう一方の機能は今も提供しているか未確認）
-   - 相手のノードによっては、小さすぎるチャネルを受け付けない（チャネルの最小額は相手ごとに違う。TODO：開く前に確かめる）
+## 2. 手順
 
-Voltage の REST は信頼された CA が署名した TLS 証明書を使うので、`LND_TLS_CERT_PATH` は空のままでよい。
+順番に流す。1 は本人の Mac で、2〜5 は Mac から VPS に向けて流す。どれも何度流しても同じ結果になる。
 
-macaroon と URL は VPS にだけ置く。Vercel には置かない。
-
-## 3. VPS（運用者の作業、手順は Claude が補える）
+### 2.1 VPS を外から触れる状態にする（Mac）
 
 ```bash
-sudo useradd --system --create-home --home-dir /opt/lnbtc lnbtc
-sudo mkdir -p /var/lib/lnbtc /etc/lnbtc
-sudo chown lnbtc:lnbtc /var/lib/lnbtc
-sudo chmod 700 /var/lib/lnbtc /etc/lnbtc
+python3 deploy/xserver/open_vps.py --dry-run
+python3 deploy/xserver/open_vps.py
+ssh -i ~/.ssh/lnbtc root@153.115.37.3 true
 ```
 
-コードは `/opt/lnbtc/app` に置き、`uv sync --locked` で依存を入れる（uv は公式の手順で入れる）。
+API キーは `~/.config/xserver/api_key` から読み、表示しない。パケットフィルター `lnbtc` を作り、tcp 22（その Mac の IPv4/32）・80・443 を足して、メインの NIC に適用する。Mac の IP が変わったら流し直す（新しい /32 が足される。古いルールはパネルか API で消す）。
 
-`/etc/lnbtc/facilitator.env`（`chmod 600`、所有者 root）に `.env.example` の変数を書く。例：
-
-```
-LNBTC_STORE_PATH=/var/lib/lnbtc/replay.db
-LNBTC_CREDIT_PATH=/var/lib/lnbtc/credits.db
-LNBTC_HMAC_KEYS=<鍵ID>:<秘密>
-LNBTC_ALLOW_MAINNET=false
-LNBTC_PAY_TO=<ノードの公開鍵>
-LND_REST_URL=https://<ノードのエンドポイント>:8080
-LND_MACAROON_PATH=/etc/lnbtc/invoice-only.macaroon
-LND_NETWORK=mainnet
-```
-
-`LNBTC_ALLOW_MAINNET` は往復の直前まで `false` にしておく。`false` のままだと `/invoice` は mainnet の依頼を `unsupported_network` で断り、testnet の依頼は mainnet のノードに送らずに 502 を返す。`/healthz` でノードへの疎通（`"node": "ok"`）だけは先に確かめられる。
-
-macaroon は `/etc/lnbtc/invoice-only.macaroon`（`chmod 640`、グループ lnbtc）。`LND_TLS_CERT_PATH` は書かない（Voltage は信頼された CA の証明書。§2）。自己署名のノードに替えたときだけ、その証明書のパスを入れる。
-
-`/etc/systemd/system/lnbtc-facilitator.service`：
-
-```ini
-[Unit]
-Description=lnbtc facilitator
-After=network-online.target time-sync.target
-Wants=network-online.target
-
-[Service]
-User=lnbtc
-Group=lnbtc
-WorkingDirectory=/opt/lnbtc/app
-EnvironmentFile=/etc/lnbtc/facilitator.env
-ExecStart=/opt/lnbtc/app/.venv/bin/python -m facilitator.main
-Restart=on-failure
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/lnbtc
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-掃除（1 時間ごと）。`/etc/systemd/system/lnbtc-purge.service`：
-
-```ini
-[Unit]
-Description=lnbtc replay store purge
-
-[Service]
-Type=oneshot
-User=lnbtc
-Group=lnbtc
-WorkingDirectory=/opt/lnbtc/app
-EnvironmentFile=/etc/lnbtc/facilitator.env
-ExecStart=/opt/lnbtc/app/.venv/bin/python -m facilitator.purge
-```
-
-`/etc/systemd/system/lnbtc-purge.timer`：
-
-```ini
-[Unit]
-Description=hourly lnbtc replay store purge
-
-[Timer]
-OnCalendar=hourly
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
+### 2.2 初期設定
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now lnbtc-facilitator.service lnbtc-purge.timer
-curl -s localhost:8000/healthz
+ssh -i ~/.ssh/lnbtc root@153.115.37.3 'bash -s' < deploy/vps/01-bootstrap.sh
 ```
 
-## 4. Cloudflare Tunnel と Access（運用者の作業）
+パスワード認証を切る（`PasswordAuthentication no`・`PermitRootLogin prohibit-password`）、更新、自動のセキュリティ更新、chrony、ufw（22・80・443）、ユーザー `phoenixd`・`lnbtc`。
 
-前提：x402jp.com が Cloudflare に載っている。ホスト名は仮に `lnbtc.x402jp.com` とする。
-
-1. Zero Trust のダッシュボードで Tunnel を作る（Networks → Tunnels）。表示されるコマンドで VPS に cloudflared を入れ、サービスとして登録する
-2. その Tunnel の公開ホスト名に `lnbtc.x402jp.com` を足し、転送先を `http://localhost:8000` にする
-3. Access → Service Auth（Service credentials）でサービストークンを作る。JIN 用と OSD 用で分けると、片方だけ取り消せる。Client Secret は作成時にしか表示されないので、その場で控える
-4. Access → Applications で self-hosted のアプリケーションを作り、ドメインを `lnbtc.x402jp.com` にする
-5. そのアプリケーションのポリシーを作る。action は Service Auth、include にさっきのサービストークンを入れる。action を Allow にするとログイン画面に飛ばされ、JIN から呼べない
-6. 確かめる：トークンなしの `curl https://lnbtc.x402jp.com/healthz` が拒否され、ヘッダを付けると通る
+### 2.3 phoenixd
 
 ```bash
-curl -s https://lnbtc.x402jp.com/healthz -H "CF-Access-Client-Id: <id>" -H "CF-Access-Client-Secret: <secret>"
+ssh -i ~/.ssh/lnbtc root@153.115.37.3 'ACCEPT_PHOENIXD_TOS=yes bash -s' < deploy/vps/02-install-phoenixd.sh
 ```
 
-7. JIN・OSD の Vercel の環境変数にトークンの 2 つの値を入れる（JIN・OSD 側の実装で `CF-Access-Client-Id` と `CF-Access-Client-Secret` のヘッダに載せる）
+`ACCEPT_PHOENIXD_TOS=yes` は ACINQ の利用規約に同意するという意味で、運用者が決める。署名とハッシュを確かめてから `/opt/phoenixd` に入れ、systemd で常駐させ、限定パスワードだけを `/etc/lnbtc/phoenixd-limited-password` に写す。最後に nodeId（= `LNBTC_PAY_TO`）を表示する。
 
-参考：<https://developers.cloudflare.com/cloudflare-one/identity/service-tokens/>
+### 2.4 facilitator と Caddy
 
-## 4.5 運用者の作業のまとめ
+```bash
+ssh -i ~/.ssh/lnbtc root@153.115.37.3 'REF=main bash -s' < deploy/vps/03-install-facilitator.sh
+```
 
-1. VPS を契約する（§1。固定 IP があること）
-2. Voltage で mainnet の LND ノードを作り、Macaroon Bakery で invoice 専用の macaroon を焼き、API の接続元を VPS の IP に絞る（§2）
-3. Cloudflare Tunnel と Access を設定する（§4）
-4. チャネルを開き、インバウンドを作るための最初の送金をする（§2 の 6）。要る資金は、開くチャネルの容量とオンチェーン手数料の合計
-5. HMAC 鍵を作り、VPS と JIN・OSD の Vercel に入れる
+公開リポジトリから取り、`deploy/requirements.txt`（`uv.lock` から書き出したハッシュ付き。CI で一致を確かめる）を `pip --require-hashes` で入れる。`/etc/lnbtc/facilitator.env` を作り、HMAC 鍵を 2 本（`jin-2026-11`・`osd-2026-11`）作る。`LNBTC_ALLOW_MAINNET=false` で始める。Caddy は公式の apt リポジトリから入れる。証明書は DNS の A レコードが向いてから取れる。
 
-順番は 1 → 2 → 3。2 の接続元 IP の制限は、1 で VPS の固定 IP が決まってからでないとできない。4 と 5 は 2 の後なら並行して進めてよい。
+Python は Ubuntu 24.04 の 3.12 を使う。`bolt11` 2.2.0 が Python 3.13 未満しか受け付けないため（3.12 の venv で全件入ることを確かめた）。
 
-## 5. mainnet の少額往復（Phase 2 の受け入れ）
+### 2.5 チャネルを開く
 
-運用者の確認を取ってから行う。
+```bash
+ssh -i ~/.ssh/lnbtc root@153.115.37.3 'bash -s' < deploy/vps/04-liquidity.sh
+ssh -i ~/.ssh/lnbtc root@153.115.37.3 'AMOUNT_SAT=30000 bash -s' < deploy/vps/04-liquidity.sh
+```
 
-1. `/healthz` が `"node": "ok"` を返すことを確かめる
-2. `LNBTC_ALLOW_MAINNET=true` にして再起動する
-3. JIN の lnbtc の 402 から invoice を受け取り、自分のウォレットで 12 sats を払い、preimage を付けて再送して 200 を受け取る
-4. 同じ preimage で再送して `duplicate_settlement` になること、invoice の期限切れのあとは新しい 402 が出ることを確かめる
-5. 1,000 sats を超える額の `/invoice` が `amount_exceeds_call_cap` になることを確かめる
-6. 往復の記録（invoice、payment_hash、各応答、時刻）を `docs/` に残す。preimage は残さない
+1 回目で 2m sat のチャネルを開く費用（サービス手数料 1%＋マイニング手数料）を見積もる。2 回目で、見積もりを上回る額の invoice を作る（説明は `lnbtc-facilitator initial liquidity`）。本人が払うと phoenixd がチャネルを開き、費用を引いた残りが残高になる。見積もりより少ない入金は、返金できない fee credit になる。
 
-## 6. 戻すとき・止めるとき
+### 2.6 mainnet の往復
 
-- Lightning の受付を止めるだけなら `LNBTC_ALLOW_MAINNET=false` にして再起動する。JIN・OSD は `/invoice` の失敗で lnbtc を 402 から外す
-- リプレイストアを古いバックアップで戻さない（CLAUDE.md §7）
+運用者の確認を取ってから `LNBTC_ALLOW_MAINNET=true` にして `systemctl restart lnbtc-facilitator` する。記録には、リクエスト・402・invoice・着金（`incoming_payment` の応答。preimage は含まない）・200 を残す。
+
+TODO：JIN の有料エンドポイントに lnbtc を組み込む作業（CLAUDE.md §6 の JIN 側の作業）は、まだ JIN の main に入っていない。
+
+## 3. 本人の作業
+
+### 3.1 DNS（XServer）
+
+`lnbtc.x402jp.com` の A レコードを `153.115.37.3` に向ける。XServer のどのサービスで x402jp.com の DNS を管理しているか（XServer レンタルサーバーのサーバーパネルか、XServer ドメインの管理画面か）によって画面が違う。TODO：本人に確かめる。入力値はどちらでも次のとおり。
+
+| 項目 | 値 |
+|---|---|
+| ホスト名 | `lnbtc`（.x402jp.com は画面で補われる） |
+| 種別 | `A` |
+| 内容 | `153.115.37.3` |
+| TTL | 既定のまま（3600 など） |
+| 優先度 | 空欄 |
+
+### 3.2 シードのバックアップ
+
+`/var/lib/phoenixd/.phoenix/seed.dat` は資金を取り戻すための唯一の鍵（12 語のシード）。失うと、チャネルの残高を取り戻せない。中身をチャットや画面に貼らない。手元に写すなら Mac で次を流し、オフラインの媒体（暗号化した USB など）に移してから Mac から消す。
+
+```bash
+umask 077
+scp -i ~/.ssh/lnbtc root@153.115.37.3:/var/lib/phoenixd/.phoenix/seed.dat ~/lnbtc-seed.dat
+```
+
+### 3.3 HMAC 鍵を Vercel に入れる
+
+鍵は `/etc/lnbtc/facilitator.env` の `LNBTC_HMAC_KEYS` にある。チャットに貼らず、Mac から VPS を経由して Vercel の CLI に直接渡す（TODO：JIN 側の環境変数名は、JIN の組み込みの実装で決める）。
+
+## 4. 運用
+
+- 状態：`systemctl status phoenixd lnbtc-facilitator caddy`、`curl -s localhost:8000/healthz`
+- 掃除：`lnbtc-purge.timer` が 1 時間ごとに `python -m facilitator.purge` を流す
+- 止める：`LNBTC_ALLOW_MAINNET=false` にして再起動すると、`/invoice` は mainnet を断る。JIN・OSD は lnbtc を 402 から外す
+- リプレイストア（`/var/lib/lnbtc/replay.db`）を古いバックアップで戻さない（CLAUDE.md §7）
+- phoenixd の更新：`02-install-phoenixd.sh` の VERSION・EXPECTED_SHA256 を新しいリリースに合わせ、署名を確かめてから流す
 
 ## 出典
 
-- Voltage の Macaroon Bakery と macaroon の権限：<https://docs.voltage.cloud/macaroons>
-- Voltage API（接続元 IP の許可リスト）：<https://docs.voltage.cloud/voltage-api>
-- Voltage の testnet 停止と Mutinynet：<https://docs.voltage.cloud/dev-sandbox-mutinynet>
-- LND の REST（AddInvoice）：<https://lightning.engineering/api-docs/api/lnd/lightning/add-invoice/>
-- インバウンド流動性・TLS 証明書・`lncli bakemacaroon` の `--timeout` は、運用者が Voltage と LND の公開ドキュメントで調べたもの（2026-10-28）
+- phoenixd v0.9.3 のソース：<https://github.com/ACINQ/phoenixd/tree/v0.9.3>
+- phoenixd のリリースと署名：<https://github.com/ACINQ/phoenixd/releases/tag/v0.9.3>、<https://acinq.co/pgp/padioupm.asc>
+- XServer VPS クラウド API：<https://developer.xserver.ne.jp/api/vps-cloud/>（openapi.json で項目名を確かめた）

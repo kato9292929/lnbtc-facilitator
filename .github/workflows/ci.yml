@@ -19,3 +19,8 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run pytest
+      # VPS はこのファイルで依存を入れる。uv.lock と食い違っていたら落とす。
+      - run: |
+          uv export --frozen --no-dev --no-emit-project --no-header --format requirements-txt -o /tmp/requirements.txt
+          diff -u deploy/requirements.txt /tmp/requirements.txt
+      - run: for f in deploy/vps/*.sh; do bash -n "$f"; done && python -m py_compile deploy/xserver/open_vps.py

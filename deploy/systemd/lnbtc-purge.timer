@@ -1,0 +1,9 @@
+[Unit]
+Description=hourly lnbtc replay store purge
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

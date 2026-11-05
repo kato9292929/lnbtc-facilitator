@@ -1,0 +1,23 @@
+[Unit]
+Description=lnbtc facilitator (x402 exact/lnbtc)
+After=network-online.target time-sync.target phoenixd.service
+Wants=network-online.target
+
+[Service]
+User=lnbtc
+Group=lnbtc
+WorkingDirectory=/opt/lnbtc/app
+EnvironmentFile=/etc/lnbtc/facilitator.env
+# 1 プロセスで動かす（レート制限がプロセス内のメモリにあるため）。
+ExecStart=/opt/lnbtc/venv/bin/python -m facilitator.main
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lnbtc
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

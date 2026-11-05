@@ -8,8 +8,9 @@
 uvicorn は 1 プロセスで動かす。レート制限がプロセス内のメモリにあるため、複数ワーカーに
 すると上限がワーカー数倍に緩む。
 
-受信ノードは LND の REST（Voltage を想定、facilitator/lnd.py）。`LND_REST_URL` を
-設定しなければアダプタを作らず、`/invoice` は 503 を返す。
+受信ノードは同じ VPS の phoenixd（facilitator/phoenixd.py、`PHOENIXD_URL`）。LND の REST
+（facilitator/lnd.py、`LND_REST_URL`）も選べるが、両方は設定できない。どちらも無ければ
+アダプタを作らず、`/invoice` は 503 を返す。
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from typing import Any
 from facilitator.pricing import MAX_SATS_PER_CALL
 from facilitator.vendor.lnbtc.constants import DEFAULT_CLOCK_SKEW, MAINNET, TESTNET
 
-#: `LND_NETWORK` の値と CAIP-2 の network。ノードは 1 つの network にしか属さない。
+#: `PHOENIXD_NETWORK`・`LND_NETWORK` の値と CAIP-2 の network。ノードは 1 つの network にしか
+#: 属さない。
 LND_NETWORKS = {"mainnet": MAINNET, "testnet": TESTNET}
 
 DEFAULT_HOST = "127.0.0.1"
@@ -53,6 +55,9 @@ class Settings:
     lnd_macaroon_path: str | None = None
     lnd_tls_cert_path: str | None = None
     lnd_network: str | None = None
+    phoenixd_url: str | None = None
+    phoenixd_password_file: str | None = field(default=None, repr=False)
+    phoenixd_network: str | None = None
 
     def app_kwargs(self) -> dict[str, Any]:
         return {
@@ -121,16 +126,22 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     pay_to = env.get("LNBTC_PAY_TO", "").strip() or None
     if pay_to is not None and not re.fullmatch(r"0[23][0-9a-f]{64}", pay_to):
         raise ConfigError("LNBTC_PAY_TO は 66 桁・小文字 16 進の圧縮公開鍵で指定してください")
+    phoenixd_url = env.get("PHOENIXD_URL", "").strip() or None
+    phoenixd_password_file = phoenixd_network = None
     lnd_rest_url = env.get("LND_REST_URL", "").strip() or None
+    if phoenixd_url is not None and lnd_rest_url is not None:
+        raise ConfigError("PHOENIXD_URL と LND_REST_URL は片方だけ設定してください")
+    if phoenixd_url is not None:
+        phoenixd_password_file = required(env, "PHOENIXD_PASSWORD_FILE")
+        phoenixd_network = _network(env, "PHOENIXD_NETWORK")
+        if pay_to is None:
+            raise ConfigError("PHOENIXD_URL を使うときは LNBTC_PAY_TO も設定してください")
     lnd_macaroon_path = lnd_network = None
     if lnd_rest_url is not None:
         if not lnd_rest_url.startswith("https://"):
             raise ConfigError("LND_REST_URL は https:// で指定してください")
         lnd_macaroon_path = required(env, "LND_MACAROON_PATH")
-        network_name = required(env, "LND_NETWORK").lower()
-        if network_name not in LND_NETWORKS:
-            raise ConfigError("LND_NETWORK は mainnet か testnet で指定してください")
-        lnd_network = LND_NETWORKS[network_name]
+        lnd_network = _network(env, "LND_NETWORK")
         if pay_to is None:
             # 照合に使う署名鍵が無いと、発行した invoice を確かめられない。
             raise ConfigError("LND_REST_URL を使うときは LNBTC_PAY_TO も設定してください")
@@ -155,11 +166,42 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         lnd_macaroon_path=lnd_macaroon_path,
         lnd_tls_cert_path=env.get("LND_TLS_CERT_PATH", "").strip() or None,
         lnd_network=lnd_network,
+        phoenixd_url=phoenixd_url,
+        phoenixd_password_file=phoenixd_password_file,
+        phoenixd_network=phoenixd_network,
     )
 
 
+def _network(env: Mapping[str, str], name: str) -> str:
+    value = required(env, name).lower()
+    if value not in LND_NETWORKS:
+        raise ConfigError(f"{name} は mainnet か testnet で指定してください")
+    return LND_NETWORKS[value]
+
+
+def read_password_file(path: str) -> str:
+    """パスワードを 1 行のファイルから読む。環境変数やプロセスの引数に秘密を載せないため。"""
+    with open(path, encoding="utf-8") as handle:
+        value = handle.read().strip()
+    if not value or "\n" in value:
+        raise ValueError("パスワードのファイルは 1 行で書いてください")
+    return value
+
+
 def build_receiver(settings: Settings):
-    """LND の REST のアダプタを作る。`LND_REST_URL` が無ければ None。"""
+    """受信側アダプタを作る。phoenixd・LND のどちらも設定が無ければ None。"""
+    if settings.phoenixd_url is not None:
+        from facilitator.phoenixd import PhoenixdReceiver
+
+        try:
+            return PhoenixdReceiver(
+                settings.phoenixd_url,
+                read_password_file(settings.phoenixd_password_file),
+                network=settings.phoenixd_network,
+            )
+        except (OSError, ValueError) as exc:
+            # 例外の種類だけを出す。パスワードの中身は出さない。
+            raise ConfigError(f"phoenixd の設定を読めません: {type(exc).__name__}") from exc
     if settings.lnd_rest_url is None:
         return None
     from facilitator.lnd import LndRestReceiver, load_macaroon_hex

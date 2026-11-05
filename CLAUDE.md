@@ -1,6 +1,6 @@
 # CLAUDE.md — lnbtc-facilitator 作業指示書
 
-このファイルはリポジトリ直下に置く作業指示書で、Claude Code はこれをプロジェクトの前提として読む。チャット履歴は引き継がれないので、作業に必要な判断はすべてここに書く。2026-10-28 時点（Phase 1.5 完了、Phase 2 のコード側の作業を実装済み）の状態に基づく。
+このファイルはリポジトリ直下に置く作業指示書で、Claude Code はこれをプロジェクトの前提として読む。チャット履歴は引き継がれないので、作業に必要な判断はすべてここに書く。2026-11-05 時点（ノードを phoenixd on XServer VPS クラウドに切り替え、コードとデプロイのスクリプトまで。VPS ではまだ流していない）の状態に基づく。
 
 ## 0. これは何か
 
@@ -17,7 +17,7 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
    │ ① GET /api/jin/series
    ▼
 [JIN・OSD（Next.js on Vercel）]  ── ② invoice 発行（HMAC 付き）──▶ [このファシリテーター（単一ホストの VPS）]
-   │  402 を出す側（resource server）                               ──▶ Voltage の LND（mainnet、REST）
+   │  402 を出す側（resource server）                               ──▶ 同じ VPS の phoenixd（127.0.0.1:9740）
    │ ③ 402 + extra.invoice                                         SQLite（リプレイストア・クレジット台帳）
    ▼                                                                    ▲
 [エージェント] ④ invoice を支払う ⑤ preimage を付けて再送               │
@@ -32,7 +32,8 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 | 402 を出す、リクエストハッシュを再計算する | JIN・OSD のリポジトリ（TypeScript） | JIN では `src/lib/jcs.ts`・`src/lib/lnbtc.ts`。このリポジトリには無い |
 | invoice の発行、証明の検証と消費 | このリポジトリ（Python） | `facilitator/` |
 | ノードの資格情報（invoice 用 macaroon）、リプレイストア | このリポジトリが動くホストだけ | Vercel には置かない |
-| Lightning ノード | Voltage（ホスティングの LND、mainnet） | ファシリテーターからインターネット越しに REST で呼ぶ。ノードとホストは同居しない |
+| Lightning ノード | phoenixd（ACINQ、mainnet）。facilitator と同じ XServer VPS クラウド（`lnbtc-facilitator`、153.115.37.3、Ubuntu 24.04） | API は 127.0.0.1:9740 だけ。facilitator には限定パスワード（`http-password-limited-access`）だけを渡す |
+| 公開 | Caddy が `lnbtc.x402jp.com` を HTTPS で公開（Let's Encrypt） | XServer のパケットフィルターで 22（運用者の IP/32）・80・443 だけを開ける |
 
 このリポジトリを分けた理由は次の 3 つ。
 
@@ -68,7 +69,7 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 | 保持期限 | 24 時間固定。ただし仕様の下限（`invoice_end + skew + 1h`）のほうが後なら下限を採る | `facilitator/replay.py` |
 | 価格 | series 12000 msat（12 sats）/ movers 24000 msat（24 sats）。基準 BTC/USD 84,464.00（Bybit、2026-09-27）。見直しは月初と、基準から ±30% 乖離したとき | `facilitator/pricing.py`、`docs/lnbtc-pricing.md` |
 | 1 コール上限 | 1 コール 1,000 sats 以下。testnet にも同じ上限をかける | `/settle` と `/invoice` で `pricing.exceeds_call_cap()` を呼ぶ。`LNBTC_MAX_SATS_PER_CALL` |
-| 呼び出し元の認証 | 外側は Cloudflare Access のサービストークン、内側は HMAC | `facilitator/auth.py` |
+| 呼び出し元の認証 | HMAC。2026-11-05 に Cloudflare Access をやめた（Caddy で直接公開するため）。Vercel の送信元 IP は固定できないので、443 を IP でも絞らない | `facilitator/auth.py` |
 | HMAC | ヘッダ `X-JIN-Signature: t=<unix秒>,k=<鍵ID>,v1=<16進>`。署名対象は timestamp・method・path・body。時刻ずれ 30 秒超は拒否。定数時間比較。鍵を 2 本同時に受理して入れ替える | 同上 |
 | レート制限 | 鍵 ID ごと、超過は 429。既定 120 回 / 60 秒（根拠のある数字ではない） | 同上 |
 | エラー応答 | `errorReason` だけ返す。`error_message` と `payer` は出さない | `facilitator/settle.py` |
@@ -88,26 +89,29 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 - `facilitator/settle.py`：`create_app()`。`/healthz`・`/settle`・`/invoice`・`/credits`・`/credits/claim`、`/verify` は 400。1 コール上限を `/settle` と `/invoice` で強制
 - `facilitator/invoice.py`：発行した invoice の照合（§3）
 - `facilitator/main.py`：起動の入口。環境変数（`.env.example`）を読み、HMAC 鍵が無ければ起動を止める。uvicorn は 1 プロセス
-- `facilitator/lnd.py`：LND の REST の受信側アダプタ（Voltage 想定）。`POST /v1/invoices` に `value_msat`・`description_hash`（base64）・`expiry` だけを送る（`memo` は送らない）。疎通は `GET /v1/invoices?num_max_invoices=1`（invoice 用の macaroon で通るため）。設定した network 以外の依頼はノードに送らずに拒否する。https のみ。タイムアウト 2 秒
+- `facilitator/phoenixd.py`：phoenixd の受信側アダプタ（本番で使う）。`POST /createinvoice`（form）に `descriptionHash`・`amountSat`・`expirySeconds`・`externalId`（= リクエストハッシュ）を送る。`description` は送らない。msat が 1000 で割り切れない依頼はノードに送らずに拒否する。疎通は `GET /getinfo` で、chain が設定の network と違えば届かない扱い。着金の照会 `incoming_payment()` は `GET /payments/incoming/{hash}` の応答から preimage を捨てて返す（phoenixd は支払い前でも preimage を返し、限定パスワードでも読めるため）。URL は http なら 127.0.0.1 だけ。webhook は使わない
+- `facilitator/lnd.py`：LND の REST の受信側アダプタ（Voltage 用に書いたもの。いまは使わないが残してある）。`POST /v1/invoices` に `value_msat`・`description_hash`（base64）・`expiry` だけを送る（`memo` は送らない）。疎通は `GET /v1/invoices?num_max_invoices=1`（invoice 用の macaroon で通るため）。設定した network 以外の依頼はノードに送らずに拒否する。https のみ。タイムアウト 2 秒
 - `/healthz`：ノードに届かないときは 503・`"status": "degraded"`・`"node": "unreachable"`・`"invoice_issuance": false`。mainnet のノードを有効化前に置いたときも `invoice_issuance` は false
 - `facilitator/purge.py`：掃除を 1 回だけ行うコマンド（`python -m facilitator.purge`）。ストアのファイルが無ければ作らずに止める
 - `facilitator/auth.py`・`facilitator/credit.py`・`facilitator/pricing.py`
 - `tests/fakes.py`：偽の受信側アダプタ（仕様のテスト専用鍵でローカル署名、LND と同じ feature を立てる）。本番の入口からは使わない
-- `docs/deploy.md`：VPS（systemd、掃除の timer）、Voltage（macaroon、接続元 IP の制限、インバウンド流動性）、Cloudflare Tunnel と Access、mainnet の少額往復の手順の下書き。Voltage の項目は公開情報で埋めたもので、実ノードでは未確認
-- `.github/workflows/ci.yml`：`uv sync --locked`・`uv run ruff check .`・`uv run pytest`
-- テスト 165 件：LND のアダプタ（依頼の形、ノードの失敗、network の不一致、疎通、macaroon の読み込み）、アダプタ越しの mainnet の往復、`/healthz` のノード疎通、`LND_*` の設定を含む。Phase 1.5 までの内訳は Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry の範囲（1〜3600 秒）・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
+- `deploy/`：`xserver/open_vps.py`（本人の Mac で流す。XServer API でパケットフィルターを作って NIC に適用）、`vps/01-bootstrap.sh`〜`04-liquidity.sh`（VPS の初期設定、phoenixd の導入と署名検証、facilitator と Caddy、チャネルを開く invoice）、`systemd/`、`requirements.txt`（`uv.lock` から書き出したハッシュ付き。CI で一致を確かめる）
+- `docs/deploy.md`：phoenixd on XServer VPS クラウドの手順と、phoenixd のソースで確かめたこと
+- `.github/workflows/ci.yml`：`uv sync --locked`・`uv run ruff check .`・`uv run pytest`・`deploy/requirements.txt` と `uv.lock` の一致・スクリプトの構文
+- テスト 205 件：phoenixd のアダプタ（依頼の形、sat 単位の検査、network の不一致、パスワード、ノードの失敗、chain の確認、preimage を捨てること、アダプタ越しの mainnet の往復、`PHOENIXD_*` の設定）を含む。それ以前の内訳は LND のアダプタ（依頼の形、ノードの失敗、network の不一致、疎通、macaroon の読み込み）、アダプタ越しの mainnet の往復、`/healthz` のノード疎通、`LND_*` の設定を含む。Phase 1.5 までの内訳は Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry の範囲（1〜3600 秒）・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
 
 まだ無いもの。
 
-- 実ノードでの確認。LND のアダプタは REST の仕様に合わせて書き、偽の LND でしか確かめていない（TODO：Voltage の実ノードで発行・疎通を確かめる）
-- VPS の上での実際のデプロイ
+- 実ノードでの確認。phoenixd のアダプタは v0.9.3 のソースに合わせて書き、偽の phoenixd でしか確かめていない
+- VPS の上での実際のデプロイ（スクリプトは用意したが、このセッションからは VPS に届かないので流していない）
+- JIN の有料エンドポイントへの lnbtc の組み込み（JIN の main には lnbtc がまだ無い。ライブラリは JIN のブランチ `claude/sharp-ptolemy-076aoj` にだけある）
 - クレジット台帳の掃除（いまは消さない。件数が増えたら考える）
 
 ## 5. 作業の進め方
 
 - 返答・進捗・コミットメッセージは日本語。太字は使わない
 - 実装していないものや確かめていないものを「動いた」と書かない。分からないことは TODO と書く
-- 秘密情報（HMAC 鍵、ノードの macaroon、TLS 証明書、Cloudflare のトークン）はコミットしない。`.env` は `.gitignore` 済み。例は `.env.example` に値なしで書く
+- 秘密情報（HMAC 鍵、phoenixd のパスワードとシード、XServer の API キー、ノードの macaroon）はコミットしない。チャットにも貼らせない。`.env` は `.gitignore` 済み。例は `.env.example` に値なしで書く
 - `facilitator/vendor/` は書き換えない。上流との差分を保つため ruff の対象外にしてある。直す必要が出たら、その理由を NOTICE と `docs/` に書き、上流の PR にも伝える
 - 決済の経路（`/settle`、invoice 発行、認証、消費キー、金額、network）に触る変更は、テストを足してから入れる。外向きの操作（mainnet の有効化、本番ホストへのデプロイ）は運用者の確認を取ってから行う
 - 作業の前後で `uv run pytest` と `uv run ruff check .` を通す
@@ -126,28 +130,28 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 
 ### Phase 2：mainnet での少額往復（運用者の準備が要る）
 
-2026-10-28 に決定。ノードは Voltage。Voltage は testnet を止めていて、代わりの Mutinynet（signet）は仕様に無い network なので使わない（Mutinynet を受け付けるように改造しない）。testnet の往復はやめ、mainnet で 1 回 12 sats の往復をして確かめる。1 コール上限（1,000 sats）がかかっているので、誤っても損は小さい。testnet の経路は偽のアダプタのテストで守る。
+2026-10-28 に mainnet の少額往復に決めた（testnet の往復はしない。Mutinynet は仕様に無い network なので使わない）。2026-11-05 にノードを Voltage から phoenixd に切り替えた。phoenixd を facilitator と同じ XServer VPS クラウドに置く。Voltage・Alby Cloud・LND には切り替えない。1 回 12 sats、1 コール上限 1,000 sats。testnet の経路は偽のアダプタのテストで守る。
 
-このリポジトリ側の作業（実装済み。実ノードでは未確認）。
+このリポジトリ側の作業（実装済み。VPS ではまだ流していない）。
 
-1. LND の REST の受信側アダプタ（`facilitator/lnd.py`）と、`facilitator/main.py` からの組み立て（`LND_REST_URL`・`LND_MACAROON_PATH`・`LND_TLS_CERT_PATH`・`LND_NETWORK`）
-2. `/healthz` のノード疎通（§4）
-3. `docs/deploy.md` の下書き
+1. phoenixd の受信側アダプタ（`facilitator/phoenixd.py`）と、`facilitator/main.py` からの組み立て（`PHOENIXD_URL`・`PHOENIXD_PASSWORD_FILE`・`PHOENIXD_NETWORK`）
+2. `deploy/` のスクリプトと `docs/deploy.md`
 
-運用者の作業（手順は `docs/deploy.md`）。
+運用者の作業（手順は `docs/deploy.md` §2・§3）。
 
-1. Voltage で mainnet の LND ノードを作り、公開鍵・REST の URL を控え、Macaroon Bakery で `invoices:read`・`invoices:write` だけの macaroon を焼き、API の接続元を VPS の固定 IP に絞る
-2. VPS を選んで用意する（固定 IP があること）
-3. Cloudflare Tunnel と Access（サービストークン、Service Auth のポリシー）を設定する
-4. チャネルを開き、自分のノードから数万 sats を外へ払ってインバウンドを作る（LSP から買うより安い）
-5. HMAC 鍵を作り、VPS と JIN・OSD の Vercel に入れる
+1. `deploy/xserver/open_vps.py` を Mac で流し、パケットフィルターを適用する。以降のスクリプトも Mac から VPS に向けて流す（このセッションからは API キーと SSH 鍵に届かない）
+2. phoenixd の利用規約に同意するかを決める（`ACCEPT_PHOENIXD_TOS=yes`）
+3. DNS：`lnbtc.x402jp.com` の A レコードを 153.115.37.3 に向ける
+4. チャネルを開く invoice（見積もりを上回る額、目安 3 万 sats）を払う
+5. phoenixd のシードをバックアップする
+6. HMAC 鍵を JIN・OSD の Vercel に入れる
 
 JIN・OSD のリポジトリ側の作業（このリポジトリではやらない。依頼として書き出す）。
 
 1. 402 の accepts に lnbtc の項目を 1 件足す。invoice はファシリテーターの `/invoice` から 402 のたびに取る。1 秒でタイムアウトし、失敗したら lnbtc を外して Solana だけで 402 を返す
 2. 支払い付きの再送で、リクエストハッシュを実際のリクエストから再計算して `/settle` に送る。公開オリジンは設定値で固定し、転送ヘッダによる上書きを拒否する（JIN の `httpBinding` は `publicOrigin` を必須にしてある）
 3. `/settle` が成功してからハンドラを実行する。ハンドラが失敗したら `/credits` に記録し、`duplicate_settlement` が返ったときは `/credits/claim` を叩く
-4. 署名の作り方を §3 の HMAC に合わせる。Cloudflare Access のサービストークン（`CF-Access-Client-Id`・`CF-Access-Client-Secret`）もヘッダに載せる
+4. 署名の作り方を §3 の HMAC に合わせる。送り先は `https://lnbtc.x402jp.com`
 
 受け入れ条件：運用者の確認を取ってから `LNBTC_ALLOW_MAINNET=true` にし、mainnet で 1 件のエンドツーエンドの決済（12 sats）が成立して消費が記録に残る。同じ preimage での再送が `duplicate_settlement` になり、invoice の期限切れのあとは新しい 402 が出て、1,000 sats を超える `/invoice` が `amount_exceeds_call_cap` になることを実環境で確かめる。往復の記録を保存する（preimage は残さない）。
 
@@ -175,8 +179,9 @@ JIN・OSD のリポジトリ側の作業（このリポジトリではやらな�
 
 | 項目 | 必要な判断 | 止まるもの |
 |---|---|---|
-| Lightning ノード | 決定：Voltage（mainnet）。残りはノードの作成、macaroon、接続元 IP の制限、インバウンド流動性の用意（`docs/deploy.md` §2） | Phase 2 の往復 |
-| ホスト | ファシリテーターを置く VPS（これから選ぶ。条件は `docs/deploy.md` §1）と、その前段の Cloudflare Tunnel・Access の設定（運用者が行う） | Phase 2 のデプロイ |
+| Lightning ノード | 決定：phoenixd（mainnet、auto-liquidity 2m）。残りは利用規約への同意、チャネルを開く支払い、シードのバックアップ | Phase 2 の往復 |
+| ホスト | 決定：XServer VPS クラウド `lnbtc-facilitator`（153.115.37.3）。残りは DNS の A レコード | Phase 2 のデプロイ |
+| JIN への組み込み | JIN の有料エンドポイントに lnbtc を組み込む作業をどこで誰がやるか（JIN の main には未実装） | Phase 2 の往復 |
 | HMAC 鍵の配布 | 鍵の生成と、JIN・OSD の Vercel 環境変数とファシリテーター側の `LNBTC_HMAC_KEYS` への投入 | Phase 2 の往復 |
 | HMAC の署名対象 | method と path を含める追加（§3）を受け入れるか | JIN・OSD 側の実装 |
 | レート制限の値 | 既定 120 回 / 60 秒でよいか | Phase 3 |

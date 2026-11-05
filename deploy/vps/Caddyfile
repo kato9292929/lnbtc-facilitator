@@ -1,0 +1,15 @@
+# lnbtc.x402jp.com を HTTPS で公開し、127.0.0.1:8000 の facilitator へ渡す。
+# 証明書は Caddy が Let's Encrypt から自動で取る（80・443 が開いていて、A レコードが向いていること）。
+# phoenixd の API（127.0.0.1:9740）はここから出さない。
+__DOMAIN__ {
+	encode
+	header {
+		-Server
+		Cache-Control "no-store"
+		Strict-Transport-Security "max-age=31536000"
+	}
+	reverse_proxy 127.0.0.1:8000
+	log {
+		output file /var/log/caddy/lnbtc.log
+	}
+}

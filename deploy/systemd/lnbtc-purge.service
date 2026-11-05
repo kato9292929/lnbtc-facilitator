@@ -1,0 +1,13 @@
+[Unit]
+Description=lnbtc replay store purge
+
+[Service]
+Type=oneshot
+User=lnbtc
+Group=lnbtc
+WorkingDirectory=/opt/lnbtc/app
+EnvironmentFile=/etc/lnbtc/facilitator.env
+ExecStart=/opt/lnbtc/venv/bin/python -m facilitator.purge
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lnbtc
