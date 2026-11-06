@@ -57,15 +57,15 @@ preflight() {
   for cmd in python3 curl ssh git; do
     command -v "$cmd" >/dev/null || ng "$cmd が見つかりません" "Xcode Command Line Tools を入れる（xcode-select --install）"
   done
-  [ -s "$API_KEY_FILE" ] || ng "XServer の API キーがありません（$API_KEY_FILE）" "API キーをこのファイルに 1 行で保存する"
-  [ -s "$SSH_KEY" ] || ng "SSH の秘密鍵がありません（$SSH_KEY）" "鍵をこのパスに置く"
+  [ -s "$API_KEY_FILE" ] || ng "XServer の API キーがありません（${API_KEY_FILE}）" "API キーをこのファイルに 1 行で保存する"
+  [ -s "$SSH_KEY" ] || ng "SSH の秘密鍵がありません（${SSH_KEY}）" "鍵をこのパスに置く"
   chmod 600 "$SSH_KEY" "$API_KEY_FILE" 2>/dev/null
   BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)
   HEAD_SHA=$(git -C "$REPO_DIR" rev-parse HEAD)
   REMOTE_SHA=$(git -C "$REPO_DIR" ls-remote origin "refs/heads/$BRANCH" 2>>"$LOG" | cut -f1)
   [ "$HEAD_SHA" = "$REMOTE_SHA" ] || ng "手元のブランチ $BRANCH が GitHub と一致しません" \
     "git -C $REPO_DIR pull を流してから、もう一度実行する"
-  ok "事前確認（ブランチ $BRANCH、${HEAD_SHA:0:7}）"
+  ok "事前確認（ブランチ ${BRANCH}、${HEAD_SHA:0:7}）"
 }
 
 # ------------------------------------------------------------------ 1. XServer API
@@ -78,7 +78,7 @@ open_vps() {
 wait_ssh() {
 
   for _ in $(seq 1 30); do
-    if rcmd true >>"$LOG" 2>&1; then ok "${1:-}SSH で入れる（root@$VPS_IP）"; return; fi
+    if rcmd true >>"$LOG" 2>&1; then ok "${1:-}SSH で入れる（root@${VPS_IP}）"; return; fi
     sleep 10
   done
   ng "SSH で入れません（5 分待ちました）" \
@@ -184,7 +184,7 @@ check() {
   resolved=$(python3 -c "import socket; print(socket.gethostbyname('$DOMAIN'))" 2>>"$LOG") || resolved=""
   [ "$resolved" = "$VPS_IP" ] || ng "$DOMAIN がまだ $VPS_IP を向いていません（いまは ${resolved:-未登録}）" \
     "サーバーパネルの DNS レコードを確かめ、反映を待ってから流し直す"
-  ok "2/5 DNS（$DOMAIN → $VPS_IP）"
+  ok "2/5 DNS（$DOMAIN → ${VPS_IP}）"
 
   run rcmd "systemctl reload caddy" || true
   health=""

@@ -61,7 +61,7 @@ PHOENIXD_PASSWORD_FILE=/etc/lnbtc/phoenixd-limited-password
 PHOENIXD_NETWORK=mainnet
 CONF
   unset jin osd
-  echo "設定を作りました: $ENV_FILE（HMAC 鍵 jin-2026-11・osd-2026-11 を含む）"
+  echo "設定を作りました: ${ENV_FILE}（HMAC 鍵 jin-2026-11・osd-2026-11 を含む）"
 else
   sed -i "s/^LNBTC_PAY_TO=.*/LNBTC_PAY_TO=${node_id}/" "$ENV_FILE"
   echo "既存の設定を使います: $ENV_FILE"

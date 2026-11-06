@@ -25,3 +25,5 @@ jobs:
           diff -u deploy/requirements.txt /tmp/requirements.txt
       - run: for f in deploy/vps/*.sh deploy/run-from-mac.sh; do bash -n "$f"; done && python -m py_compile deploy/xserver/open_vps.py deploy/roundtrip.py
       - run: uvx --from shellcheck-py shellcheck -S warning deploy/run-from-mac.sh deploy/vps/*.sh
+      # macOS の bash 3.2 は $VAR の直後の全角文字まで変数名として読む。${VAR} と書く。
+      - run: "! grep -nP '\\$[A-Za-z_][A-Za-z0-9_]*[^\\x00-\\x7f]' deploy/run-from-mac.sh deploy/vps/*.sh"
