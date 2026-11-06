@@ -1,6 +1,6 @@
 # CLAUDE.md — lnbtc-facilitator 作業指示書
 
-このファイルはリポジトリ直下に置く作業指示書で、Claude Code はこれをプロジェクトの前提として読む。チャット履歴は引き継がれないので、作業に必要な判断はすべてここに書く。2026-11-05 時点（ノードを phoenixd on XServer VPS クラウドに切り替え、コードとデプロイのスクリプトまで。VPS ではまだ流していない）の状態に基づく。
+このファイルはリポジトリ直下に置く作業指示書で、Claude Code はこれをプロジェクトの前提として読む。チャット履歴は引き継がれないので、作業に必要な判断はすべてここに書く。2026-11-06 時点（ノードを phoenixd on XServer VPS クラウドに切り替え、コード・Mac で流すデプロイのスクリプト・JIN 側の組み込みの PR まで。VPS ではまだ流していない）の状態に基づく。
 
 ## 0. これは何か
 
@@ -95,7 +95,8 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 - `facilitator/purge.py`：掃除を 1 回だけ行うコマンド（`python -m facilitator.purge`）。ストアのファイルが無ければ作らずに止める
 - `facilitator/auth.py`・`facilitator/credit.py`・`facilitator/pricing.py`
 - `tests/fakes.py`：偽の受信側アダプタ（仕様のテスト専用鍵でローカル署名、LND と同じ feature を立てる）。本番の入口からは使わない
-- `deploy/`：`xserver/open_vps.py`（本人の Mac で流す。XServer API でパケットフィルターを作って NIC に適用）、`vps/01-bootstrap.sh`〜`04-liquidity.sh`（VPS の初期設定、phoenixd の導入と署名検証、facilitator と Caddy、チャネルを開く invoice）、`systemd/`、`requirements.txt`（`uv.lock` から書き出したハッシュ付き。CI で一致を確かめる）
+- `deploy/run-from-mac.sh`：本人が Mac で 1 本流すと、XServer API でパケットフィルターを開け、VPS に phoenixd・facilitator・Caddy を入れ、本人への依頼を表示する。`--check`（チャネル・DNS・HTTPS を確かめて mainnet を有効化）・`--backup-seed`・`--copy-hmac`・`--roundtrip`（`deploy/roundtrip.py` で JIN に 12 sats を払い、記録を残す）。各段階の成否を 1 行ずつ出し、詳しい出力は `~/lnbtc-deploy-<日時>.log`。鍵・パスワード・シード・preimage は表示しない。偽の ssh で最初から最後まで流して確かめた（実の VPS ではまだ）
+- `deploy/`：`xserver/open_vps.py`（XServer API でパケットフィルターを作って NIC に適用）、`vps/01-bootstrap.sh`〜`05-selftest.sh`（VPS の初期設定、phoenixd の導入と署名検証、facilitator と Caddy、チャネルを開く invoice と着金の照会、自己テスト）、`systemd/`、`requirements.txt`（`uv.lock` から書き出したハッシュ付き。CI で一致を確かめる）
 - `docs/deploy.md`：phoenixd on XServer VPS クラウドの手順と、phoenixd のソースで確かめたこと
 - `.github/workflows/ci.yml`：`uv sync --locked`・`uv run ruff check .`・`uv run pytest`・`deploy/requirements.txt` と `uv.lock` の一致・スクリプトの構文
 - テスト 205 件：phoenixd のアダプタ（依頼の形、sat 単位の検査、network の不一致、パスワード、ノードの失敗、chain の確認、preimage を捨てること、アダプタ越しの mainnet の往復、`PHOENIXD_*` の設定）を含む。それ以前の内訳は LND のアダプタ（依頼の形、ノードの失敗、network の不一致、疎通、macaroon の読み込み）、アダプタ越しの mainnet の往復、`/healthz` のノード疎通、`LND_*` の設定を含む。Phase 1.5 までの内訳は Phase 1 の 57 件に加え、HTTP を通した「発行 → 支払い → `/settle` 成功 → `duplicate_settlement`」、`/invoice` の否定系（認証・署名の投げ替え・429・network・amount・上限の境界・description hash・expiry の範囲（1〜3600 秒）・型）、ノードの設定ずれ 8 通りを外に出さないこと、`/settle` の上限、feature フィールドの拒否箇所、環境変数の読み込みと起動拒否、掃除コマンド
@@ -104,7 +105,7 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 
 - 実ノードでの確認。phoenixd のアダプタは v0.9.3 のソースに合わせて書き、偽の phoenixd でしか確かめていない
 - VPS の上での実際のデプロイ（スクリプトは用意したが、このセッションからは VPS に届かないので流していない）
-- JIN の有料エンドポイントへの lnbtc の組み込み（JIN の main には lnbtc がまだ無い。ライブラリは JIN のブランチ `claude/sharp-ptolemy-076aoj` にだけある）
+- JIN の有料エンドポイントへの lnbtc の組み込みは PR（kato9292929/Japan-Inflation-Nowcast#15、ブランチ `claude/jin-lnbtc`）にした。まだマージしていない。ローカルでこのリポジトリの facilitator と往復させて確かめた
 - クレジット台帳の掃除（いまは消さない。件数が増えたら考える）
 
 ## 5. 作業の進め方
@@ -137,16 +138,15 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 1. phoenixd の受信側アダプタ（`facilitator/phoenixd.py`）と、`facilitator/main.py` からの組み立て（`PHOENIXD_URL`・`PHOENIXD_PASSWORD_FILE`・`PHOENIXD_NETWORK`）
 2. `deploy/` のスクリプトと `docs/deploy.md`
 
-運用者の作業（手順は `docs/deploy.md` §2・§3）。
+運用者の作業（手順は `docs/deploy.md` §2・§3）。2026-11-06 に決定：VPS への経路は手動（本人が Mac で流す）、ACINQ の利用規約には同意、JIN に組み込んでから JIN の有料エンドポイントで 12 sats の往復を通す。
 
-1. `deploy/xserver/open_vps.py` を Mac で流し、パケットフィルターを適用する。以降のスクリプトも Mac から VPS に向けて流す（このセッションからは API キーと SSH 鍵に届かない）
-2. phoenixd の利用規約に同意するかを決める（`ACCEPT_PHOENIXD_TOS=yes`）
-3. DNS：`lnbtc.x402jp.com` の A レコードを 153.115.37.3 に向ける
-4. チャネルを開く invoice（見積もりを上回る額、目安 3 万 sats）を払う
-5. phoenixd のシードをバックアップする
-6. HMAC 鍵を JIN・OSD の Vercel に入れる
+1. Mac で `bash deploy/run-from-mac.sh` を流す（このセッションからは API キーと SSH 鍵に届かない）
+2. 表示された 3 つ（チャネルを開く invoice の支払い、DNS の A レコード、シードのバックアップ）を済ませる
+3. `bash deploy/run-from-mac.sh --check` で mainnet を有効にする
+4. JIN の PR をマージし、Vercel に `LNBTC_*` を入れる（秘密は `--copy-hmac`）
+5. `bash deploy/run-from-mac.sh --roundtrip` で往復を通し、記録を残す
 
-JIN・OSD のリポジトリ側の作業（このリポジトリではやらない。依頼として書き出す）。
+JIN のリポジトリ側の作業（kato9292929/Japan-Inflation-Nowcast#15 で実装済み。OSD はまだ）。
 
 1. 402 の accepts に lnbtc の項目を 1 件足す。invoice はファシリテーターの `/invoice` から 402 のたびに取る。1 秒でタイムアウトし、失敗したら lnbtc を外して Solana だけで 402 を返す
 2. 支払い付きの再送で、リクエストハッシュを実際のリクエストから再計算して `/settle` に送る。公開オリジンは設定値で固定し、転送ヘッダによる上書きを拒否する（JIN の `httpBinding` は `publicOrigin` を必須にしてある）
@@ -181,7 +181,7 @@ JIN・OSD のリポジトリ側の作業（このリポジトリではやらな�
 |---|---|---|
 | Lightning ノード | 決定：phoenixd（mainnet、auto-liquidity 2m）。残りは利用規約への同意、チャネルを開く支払い、シードのバックアップ | Phase 2 の往復 |
 | ホスト | 決定：XServer VPS クラウド `lnbtc-facilitator`（153.115.37.3）。残りは DNS の A レコード | Phase 2 のデプロイ |
-| JIN への組み込み | JIN の有料エンドポイントに lnbtc を組み込む作業をどこで誰がやるか（JIN の main には未実装） | Phase 2 の往復 |
+| JIN への組み込み | 決定：Claude が実装して PR（Japan-Inflation-Nowcast#15）。残りはマージと Vercel の環境変数 | Phase 2 の往復 |
 | HMAC 鍵の配布 | 鍵の生成と、JIN・OSD の Vercel 環境変数とファシリテーター側の `LNBTC_HMAC_KEYS` への投入 | Phase 2 の往復 |
 | HMAC の署名対象 | method と path を含める追加（§3）を受け入れるか | JIN・OSD 側の実装 |
 | レート制限の値 | 既定 120 回 / 60 秒でよいか | Phase 3 |
