@@ -51,7 +51,12 @@ VPS に入れるコードは、Mac で今いるブランチと同じもの（Git
 
 ### 2.1 VPS を外から触れる状態にする
 
-`deploy/xserver/open_vps.py`。API キーは `~/.config/xserver/api_key` から読み、表示しない。パケットフィルター `lnbtc` を作り、tcp 22（その Mac の IPv4/32）・80・443 を足して、メインの NIC に適用する。Mac の IP が変わったら流し直す（新しい /32 が足される。古いルールはパネルか API で消す）。SSH の接続先の鍵は `~/.ssh/known_hosts_lnbtc` に分けて記録する（OS 再インストールの前の記録とぶつからないように）。
+XServer VPS クラウドは、パケットフィルターを適用するまで外からの通信をすべて遮断する（マニュアル「パケットフィルターの設定」<https://vpscloud.xserver.ne.jp/support/manual/man_server_port.php>：「パケットフィルターを適用しないVPSは、すべてのポートへの通信が遮断されます」）。
+
+- `~/.config/xserver/api_key` があれば、`deploy/xserver/open_vps.py` が API で設定する（キーの作り方はマニュアル <https://vpscloud.xserver.ne.jp/support/manual/man_tool_api.php>。キーは発行時にしか全文が出ない）
+- 無ければ、SSH が通るかを確かめる。通らなければ、上のマニュアルどおりのパネルの手順（フィルター lnbtc の作成、tcp 22（その Mac の IPv4/32）・80・443 のルール、NIC への適用）を、その Mac の IP を入れて表示して止まる。パネルで設定してから流し直す
+
+SSH の接続先の鍵は `~/.ssh/known_hosts_lnbtc` に分けて記録する（OS 再インストールの前の記録とぶつからないように）。
 
 ### 2.2 初期設定（`deploy/vps/01-bootstrap.sh`）
 
@@ -69,13 +74,19 @@ Python は Ubuntu 24.04 の 3.12 を使う。`bolt11` 2.2.0 が Python 3.13 未�
 
 ### 2.5 チャネルを開く invoice（`deploy/vps/04-liquidity.sh`）
 
-2m sat のチャネルを開く費用（サービス手数料 1%＋マイニング手数料）を見積もり、`max(30,000, 見積もり + 5,000)` sats（1,000 sats 単位に切り上げ）の invoice を作る（有効 24 時間、説明は `lnbtc-facilitator initial liquidity`）。本人が払うと phoenixd がチャネルを開き、費用を引いた残りが残高になる。見積もりより少ない入金は、返金できない fee credit になる。チャネルがもう開いていれば作らない。
+phoenixd v0.9.3 が使う lightning-kmp v1.13.2 のソースで、入金の扱いを確かめた。
+
+- 買う流動性は「入金額＋auto-liquidity（2m sat）」。入金そのものは手数料を払える額で足りる（`Phoenixd.kt` の `inboundLiquidityTarget`）。phoenixd の issue #207 にある「2m sat 以上の入金が要る」は、ソースと合わない
+- 入金（とそれまでの fee credit の合計）が「手数料率を 2.2〜3.8 倍にした最悪の手数料」以下で、fee credit の上限（既定 50,000 sat）以下なら、入金は返金できない fee credit に回り、チャネルは開かない（`IncomingPaymentHandler.kt` 219〜233 行、`Peer.kt` の `adjustFeerate`）
+- 入金が「マイニング手数料×最大 8＋サービス手数料」未満なら、支払いが拒否される（同 645〜652 行の `miningFeeFactor`）
+
+`estimateliquidityfees`（いまの手数料率、2m sat 分）の値から、`max(サービス×1.05＋マイニング×4＋5,000, サービス＋マイニング×8＋1,000, 30,000)` sats を 1,000 sats 単位に切り上げた額の invoice を作る（有効 24 時間）。手数料が低いとき（マイニング 411・サービス 21,000 sats）は 30,000 sats。払った額から手数料を引いた残りは phoenixd の残高になる。チャネルがもう開いていれば作らない。
 
 ### 2.6 mainnet の有効化と往復（`--check`・`--roundtrip`）
 
 `--check` は、チャネルが開いていて DNS と HTTPS が通ることを確かめてから `LNBTC_ALLOW_MAINNET=true` にし、自己テスト（12 sats の invoice が出る・1,000 sats 超は `amount_exceeds_call_cap`）を流す。mainnet の有効化は、運用者の指示（2026-11-05「mainnet で 12 sats の往復を 1 件成立させる」）による。
 
-`--roundtrip` は JIN の 402 から invoice を取り出して表示し、本人がウォレットで払って preimage を貼る（画面に出さない）と、再送して 200 を確かめ、同じ preimage の再送が `duplicate_settlement` になることを確かめる。phoenixd の着金の状態も記録に足す。記録に preimage は含めない。前提：JIN の lnbtc の組み込み（kato9292929/Japan-Inflation-Nowcast#15）がマージ・デプロイされ、Vercel の環境変数が入っていること。
+`--roundtrip` は JIN の 402 から invoice を取り出して表示し、本人がウォレットで払って preimage を貼る（画面に出さない）と、再送して 200 を確かめ、同じ preimage の再送が `duplicate_settlement` になることを確かめる。phoenixd の着金の状態も記録に足す。記録に preimage は含めない。支払いには preimage を見られるウォレットが要る。Phoenix は Android・iOS とも送金の詳細に Preimage を出す（ACINQ/phoenix の `TechnicalOutgoingLightning.kt`・`Details_Outgoing_Lightning.swift` で確認）。ほかのウォレットは確かめていない。前提：JIN の lnbtc の組み込み（kato9292929/Japan-Inflation-Nowcast#15）がマージ・デプロイされ、Vercel の環境変数が入っていること。
 
 ## 3. 本人の作業
 

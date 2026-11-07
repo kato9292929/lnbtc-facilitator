@@ -140,7 +140,7 @@ x402 の `exact` / `lnbtc`（Bitcoin Lightning）スキームのファシリテ�
 
 運用者の作業（手順は `docs/deploy.md` §2・§3）。2026-11-06 に決定：VPS への経路は手動（本人が Mac で流す）、ACINQ の利用規約には同意、JIN に組み込んでから JIN の有料エンドポイントで 12 sats の往復を通す。
 
-1. Mac で `bash deploy/run-from-mac.sh` を流す（このセッションからは API キーと SSH 鍵に届かない）
+1. Mac で `bash deploy/run-from-mac.sh` を流す（このセッションからは API キーと SSH 鍵に届かない）。XServer の API キーは無くてよい（2026-11-07 時点で本人の Mac に無かった）。SSH が通らなければ、パネルでパケットフィルターを設定する手順（マニュアル man_server_port.php の表記どおり）を表示して止まる
 2. 表示された 3 つ（チャネルを開く invoice の支払い、DNS の A レコード、シードのバックアップ）を済ませる
 3. `bash deploy/run-from-mac.sh --check` で mainnet を有効にする
 4. JIN の PR をマージし、Vercel に `LNBTC_*` を入れる（秘密は `--copy-hmac`）
@@ -168,6 +168,8 @@ JIN のリポジトリ側の作業（kato9292929/Japan-Inflation-Nowcast#15 で�
 自律エージェントに lnbtc の経路で JIN を叩かせ、Spend Guard の shadow mode で購買判断を記録する。1 週間分の記録（成功・失敗・失敗理由・コスト）を note 記事の素材にする。記事は実走のあとに書く。
 
 ## 7. 運用上の注意
+
+- 調べずに手順や見込みを書かない。2026-11-07 時点で確かめたこと（出典は `docs/deploy.md`）：VPS クラウドはパケットフィルター未適用だと全ポート遮断。phoenixd の入金は「手数料率を上げた最悪の手数料」以下だと fee credit に回る（lightning-kmp v1.13.2 のソース）ので、チャネルを開く invoice の金額はその判定に合わせて決める。Phoenix ウォレットは送金の詳細に preimage を出す。phoenixd の invoice は `m`（metadata）タグと feature のビット 49・149 を持ち、その形の invoice が facilitator の decode と照合を通ることは確かめた（Kotlin が書き出した実物ではまだ）
 
 - リプレイストアの SQLite を古いバックアップで戻さない。戻すと、消費済みのキーがまだ有効な invoice の期間内に復活し、同じ証明で二重に提供できてしまう。戻すなら、戻した時点から 24 時間以上の間は Lightning の受付を止める
 - ホストの時刻がずれると skew の判定が狂う。時刻同期（NTP）を必ず入れる

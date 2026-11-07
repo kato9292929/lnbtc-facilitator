@@ -23,7 +23,6 @@ SSH_KEY="$HOME/.ssh/lnbtc"
 API_KEY_FILE="$HOME/.config/xserver/api_key"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts_lnbtc"
 MIN_LIQUIDITY_SAT=30000
-LIQUIDITY_MARGIN_SAT=5000
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
 LOG="$HOME/lnbtc-deploy-$(date +%Y%m%d-%H%M%S).log"
@@ -57,9 +56,9 @@ preflight() {
   for cmd in python3 curl ssh git; do
     command -v "$cmd" >/dev/null || ng "$cmd が見つかりません" "Xcode Command Line Tools を入れる（xcode-select --install）"
   done
-  [ -s "$API_KEY_FILE" ] || ng "XServer の API キーがありません（${API_KEY_FILE}）" "API キーをこのファイルに 1 行で保存する"
   [ -s "$SSH_KEY" ] || ng "SSH の秘密鍵がありません（${SSH_KEY}）" "鍵をこのパスに置く"
-  chmod 600 "$SSH_KEY" "$API_KEY_FILE" 2>/dev/null
+  chmod 600 "$SSH_KEY" 2>/dev/null
+  if [ -s "$API_KEY_FILE" ]; then chmod 600 "$API_KEY_FILE" 2>/dev/null; fi
   BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)
   HEAD_SHA=$(git -C "$REPO_DIR" rev-parse HEAD)
   REMOTE_SHA=$(git -C "$REPO_DIR" ls-remote origin "refs/heads/$BRANCH" 2>>"$LOG" | cut -f1)
@@ -68,11 +67,48 @@ preflight() {
   ok "事前確認（ブランチ ${BRANCH}、${HEAD_SHA:0:7}）"
 }
 
-# ------------------------------------------------------------------ 1. XServer API
+# ------------------------------------------------------------------ 1. パケットフィルター
+# XServer VPS クラウドは、パケットフィルターを適用するまで外からの通信をすべて遮断する
+# （マニュアル man_server_port.php「パケットフィルターを適用しないVPSは、すべてのポートへの通信が遮断されます」）。
+# API キーがあれば API で設定する。無ければ SSH が通るか確かめ、通らなければパネルの手順を出して止める。
 open_vps() {
-  python3 "$REPO_DIR/deploy/xserver/open_vps.py" >>"$LOG" 2>&1 \
-    || ng "XServer API でパケットフィルターを適用できませんでした" "ログの「XServer API がエラーを返しました」の行を見る。権限不足ならキーの権限（パケットフィルター：full）を確かめる"
-  ok "1/7 パケットフィルター lnbtc を適用（22 はこの Mac の IP だけ、80・443）"
+  if [ -s "$API_KEY_FILE" ]; then
+    python3 "$REPO_DIR/deploy/xserver/open_vps.py" >>"$LOG" 2>&1 \
+      || ng "XServer API でパケットフィルターを適用できませんでした" "ログの「XServer API がエラーを返しました」の行を見る"
+    ok "1/7 パケットフィルター lnbtc を API で適用（22 はこの Mac の IP だけ、80・443）"
+    return
+  fi
+  if rcmd true >>"$LOG" 2>&1; then
+    ok "1/7 パケットフィルターは設定済み（SSH が通る）"
+    return
+  fi
+  local ip
+  ip=$(curl -4 -fsS --max-time 10 ifconfig.me 2>>"$LOG") || ip="（取得できませんでした）"
+  panel_steps "$ip" | tee -a "$LOG"
+  exit 1
+}
+
+# 手順は XServer VPS クラウドのマニュアル「パケットフィルターの設定」（man_server_port.php）の表記どおり。
+panel_steps() {
+  local ip=$1
+  printf '%s\n' \
+    "NG  1/7 VPS に SSH が通りません。パケットフィルターをパネルで設定してください（API キーは要りません）。" \
+    "" \
+    "  A. フィルターを作る" \
+    "    1) XServer アカウントにログインし、左のメニューの「コントロールパネル」を押す" \
+    "    2) メニューの「パケットフィルター」→「パケットフィルターを作成する」" \
+    "    3) パケットフィルター名に lnbtc と入れて「作成する」" \
+    "  B. ルールを 3 つ足す（一覧の lnbtc の「詳細」→「+ルールを追加」を 3 回。それぞれ「追加する」）" \
+    "    プロトコル TCP・IPバージョン IPv4・ポート番号 22 から 22・許可する接続元 ${ip}/32" \
+    "    プロトコル TCP・IPバージョン IPv4・ポート番号 80 から 80・許可する接続元 0.0.0.0/0" \
+    "    プロトコル TCP・IPバージョン IPv4・ポート番号 443 から 443・許可する接続元 0.0.0.0/0" \
+    "    （${ip} は、いまのこの Mac のインターネット側の IP）" \
+    "  C. VPS に適用する" \
+    "    1) 「コントロールパネル」→ VPS「lnbtc-facilitator」の「詳細」→「ネットワーク」タブ" \
+    "    2) 「ネットワークインターフェイス（NIC）」で NIC を選び「選択したネットワークを表示」" \
+    "    3) 「パケットフィルターを適用する」→ lnbtc を選んで「適用する」" \
+    "" \
+    "  済んだら、同じコマンド（bash deploy/run-from-mac.sh）をもう一度流してください。"
 }
 
 wait_ssh() {
@@ -117,11 +153,21 @@ liquidity_invoice() {
   fi
   estimate=$(remote 04-liquidity.sh MODE=estimate 2>>"$LOG") || ng "チャネルを開く費用を見積もれません" "数分待って流し直す（phoenixd が ACINQ に接続中のことがある）"
   echo "estimate: $estimate" >>"$LOG"
-  fees=$(printf '%s' "$estimate" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(int(d["miningFeeSat"])+int(d["serviceFeeSat"]))') \
+  # 金額は lightning-kmp v1.13.2（phoenixd v0.9.3 が使う版）の判定に合わせる。
+  # - 入金が「手数料率を 2.2〜3.8 倍にした最悪の手数料」以下なら fee credit に回り、チャネルは開かない
+  #   （IncomingPaymentHandler.kt 219〜233 行、Peer.kt の adjustFeerate）
+  # - 入金が「マイニング手数料×最大 8＋サービス手数料」未満なら支払いが拒否される（同 645〜652 行）
+  # - サービス手数料は「入金額＋2m sat」の 1% なので、見積もり（2m sat 分）の 1.05 倍で見る
+  local plan
+  plan=$(printf '%s' "$estimate" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+mining, service = int(d["miningFeeSat"]), int(d["serviceFeeSat"])
+need = max(int(service * 1.05) + mining * 4 + 5000, service + mining * 8 + 1000, int(sys.argv[1]))
+print(mining + service, -(-need // 1000) * 1000)' "$MIN_LIQUIDITY_SAT" 2>>"$LOG") \
     || ng "見積もりを読めません" "ログを貼って相談する"
-  amount=$(( fees + LIQUIDITY_MARGIN_SAT ))
-  amount=$(( (amount + 999) / 1000 * 1000 ))
-  [ "$amount" -lt "$MIN_LIQUIDITY_SAT" ] && amount=$MIN_LIQUIDITY_SAT
+  fees=${plan% *}
+  amount=${plan#* }
   INVOICE=$(remote 04-liquidity.sh MODE=invoice "AMOUNT_SAT=$amount" 2>>"$LOG") || ng "invoice を作れません" "ログを貼って相談する"
   INVOICE_AMOUNT=$amount
   FEES=$fees

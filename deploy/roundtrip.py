@@ -78,6 +78,8 @@ def main() -> int:
     timeout = accepted["maxTimeoutSeconds"]
     print(f"\n次の invoice を手元のウォレットで払ってください（{sats} sats、有効 {timeout} 秒）。")
     print(f"\n{invoice}\n")
+    print("Phoenix ウォレットなら、払ったあと支払いの詳細画面に Preimage が出ます"
+          "（Android はコピーできる）。\n")
 
     preimage = ""
     while not re.fullmatch(r"[0-9a-f]{64}", preimage):
